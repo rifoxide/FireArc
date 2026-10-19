@@ -66,10 +66,22 @@ Docker build layers. Only public staged inputs enter its context. Export copies
 public tools/CA paths, not homes, host credentials, device nodes or private keys.
 The exported filesystem is inventoried without following symlink targets.
 
+The pinned mkosi 25.3 archive implementation receives a narrow local delta in
+`containers/builder/build.sh`: sort tar members by name and give PAX extended
+headers stable names. Both expected upstream source fragments must match exactly
+once or the builder fails. The modified source is covered by the exported tools
+inventory and project fingerprint; the upstream package/version pin is unchanged.
+
 mkosi uses the pinned Debian tools tree under recorded host Python. Image builds
 run in rootless namespaces, including a private network namespace, and use
 offline repart—not loop devices, host mounts or privileged Docker retries.
 Verity and static audit containers have no network, host devices or capabilities.
+
+The immutable ext4 recipe explicitly fixes its public directory-hash seed and
+initializes inode tables/journal eagerly. The filesystem UUID and creation epoch
+were already fixed; neither alone fixes the directory-hash seed. This setting
+applies only to the generic read-only root payload, never to device identities,
+LUKS keys, software-TPM state or signatures.
 
 `build/output/` exposes stable aliases to the current immutable payloads.
 `build/state.json` and per-stage receipts retain exact identities and hashes.

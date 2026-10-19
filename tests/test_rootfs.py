@@ -14,6 +14,10 @@ from support import temporary
 
 
 class RootPayloadTests(unittest.TestCase):
+    def test_immutable_ext4_has_explicit_public_hash_seed_and_eager_initialization(self):
+        recipe = (ROOT / "images/rootfs/mkosi.conf").read_text()
+        self.assertIn('Environment="SYSTEMD_REPART_MKFS_OPTIONS_EXT4=-E hash_seed=5109c42f-52fa-5b1f-90f4-c582519ea3f6,lazy_itable_init=0,lazy_journal_init=0"', recipe)
+
     def authority(self):
         return {"schema": 1, "format": 1, "algorithm": "sha256", "data_bytes": rootfs.ROOT_BYTES,
                 "hash_bytes": rootfs.HASH_BYTES, "data_blocks": rootfs.ROOT_BYTES // rootfs.BLOCK_SIZE,

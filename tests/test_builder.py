@@ -33,6 +33,26 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(builder.closure_digest([first, second]), builder.closure_digest([second, first]))
         self.assertNotEqual(builder.closure_digest([first, second]), builder.closure_digest([first, {**second, "version": "3"}]))
 
+    def test_mkosi_tar_delta_sorts_only_tar_and_uses_stable_pax_names(self):
+        script = (ROOT / "containers/builder/build.sh").read_text().split("python3 - <<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+        tar = '                "tar",\n                "--create",\n'
+        cpio = '                "cpio",\n                "--create",\n'
+        pax = '"--pax-option=delete=atime,delete=ctime,delete=mtime"'
+        with temporary() as root:
+            source = root / "archive.py"
+            source.write_text(tar + pax + "\n" + cpio)
+            with patch("pathlib.Path", return_value=source):
+                exec(compile(script, "builder-mkosi-tar-delta", "exec"), {})
+            updated = source.read_text()
+            self.assertIn(tar + '                "--sort=name",\n', updated)
+            self.assertIn("exthdr.name=%d/PaxHeaders/%f", updated)
+            self.assertIn(cpio, updated)
+            self.assertEqual(updated.count('"--sort=name"'), 1)
+            for unexpected in [cpio, tar + tar + pax, tar]:
+                source.write_text(unexpected)
+                with patch("pathlib.Path", return_value=source), self.assertRaises(SystemExit):
+                    exec(compile(script, "builder-mkosi-tar-delta", "exec"), {})
+
     def test_appliance_root_uses_exact_versions_and_matching_kernel(self):
         value = builder.root_lock(ROOT)
         self.assertEqual(value["profile"], "root")

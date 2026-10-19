@@ -21,11 +21,15 @@ qualification. The complete secured appliance is not yet implemented.
 
 ## Validation
 
-The label-free bootstrap/build/verification pipeline and 67 offline tests pass.
+The label-free bootstrap/build/verification pipeline and 69 offline tests pass.
 The fresh-clone build/verification and both empty-cache reconstruction rounds
 passed component checks. Byte reproducibility failed: ext4/verity/authority
 differed between rounds, and the separate clone also differed in its root tar.
-Diagnosing nondeterministic output remains the next build-system task.
+The causes identified so far are unsorted root tar members and an unpinned ext4
+directory-hash seed. Explicit archive ordering/stable PAX names and a fixed
+public filesystem seed with eager initialization now pass build verification.
+The updated two-round clean reproducibility comparison is running; its outcome
+is not yet known.
 Results are recorded in [build-system validation](validation/build-system.md)
 and [root validation](validation/appliance-root.md); no unrun clean-build or
 byte-reproducibility result is implied by the implementation list above.
