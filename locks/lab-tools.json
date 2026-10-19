@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "purpose": "Local Q35 regression compatibility, not a portable builder or shared-library provenance lock",
+  "tools": {
+    "qemu-system-x86_64": {"version": "11.1.2", "sha256": "a2250f5e2b3b07c754473c0817df1cccf6c3c2443fc616dc474c4c311fa6ef1c"},
+    "qemu-img": {"version": "11.1.2", "sha256": "3a57bce6765bfb73a75591dba2ac40d985cccde97d371e95537ecbf16d949d30"},
+    "swtpm": {"version": "0.10.2", "sha256": "2b883328fe5b5dabb34acb07cf95f7fa6f73bed584298dcb086b30cebfc1259e"},
+    "debugfs": {"version": "1.47.4", "sha256": "9b27184084383c8607eee03b43c80eca4ef912acf4887b40a7cc420e267ad8a8"},
+    "veritysetup": {"version": "2.8.8", "sha256": "fbc00120a61154391afdcddb90ab23b00401fc3f63ab8ad59cbf57fba62b7e32"}
+  }
+}

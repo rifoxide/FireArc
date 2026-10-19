@@ -1,7 +1,7 @@
 # FireArc secure boot and atomic-update implementation plan
 
 **Date:** 2026-10-19  
-**Status:** Planning only; this document does not claim a completed implementation.  
+**Status:** Implementation started: Phase 0/1 foundation. See [progress](docs/progress.md); no completed appliance is claimed.
 **Primary specification:** `FireArc_R-D_Plan—Technical_Team.pdf`, dated 2026-10-17, all 13 pages.  
 **Implementation workspace:** `/home/rifat/projects/firearc`  
 **Read-only research reference:** `/home/rifat/projects/project_firearc`  
@@ -337,7 +337,7 @@ Do not put a critical activation check solely in RAUC's system post-install hand
 
 ## 5. Execution phases
 
-All implementation checkboxes start open. Existing research results remain historical evidence until reproduced or explicitly accepted with their original limitations.
+Check only steps supported by recorded work/evidence. Existing research results remain historical evidence until reproduced or explicitly accepted with their original limitations. A checked documentation step does not close its independent review gate.
 
 ### Phase 0 — Freeze requirements, preserve the baseline and record decisions
 
@@ -345,14 +345,14 @@ All implementation checkboxes start open. Existing research results remain histo
 **Depends on:** supplied PDF and existing research.  
 **Output:** requirements baseline, reusable-input inventory and approved threat model.
 
-1. [ ] Record the PDF hash, date, requirement IDs and B/C scope in `docs/requirements.md`.
-2. [ ] Record the user's mkosi, data-only encryption and escrow decisions as ADRs.
-3. [ ] Inventory the old research's source/configuration/public artifact references without changing them.
-4. [ ] Identify dependencies hidden by `.gitignore`: sources, downloaded packages, archives, SDK images and patched build copies are not included in a Git clone.
-5. [ ] Verify selected archive manifests before using any artifact. Preserve failures as failures; never bypass a pin check to make migration succeed.
-6. [ ] Review the old lab firmware patch, expanded config and public trust fingerprints. Separate accepted fixes from deliberately omitted revocation and development-only features.
-7. [ ] Establish the QEMU threat model and the separate physical-root requirement. Record known untested paths and the limits of historical results.
-8. [ ] Create a decision/risk register with named role owners, severity, blocking gate and evidence needed to close each issue.
+1. [x] Record the PDF hash, date, requirement IDs and B/C scope in `docs/requirements.md`.
+2. [x] Record the user's mkosi, data-only encryption and escrow decisions as ADRs.
+3. [x] Inventory the old research's source/configuration/public artifact references without changing them.
+4. [x] Identify dependencies hidden by `.gitignore`: sources, downloaded packages, archives, SDK images and patched build copies are not included in a Git clone.
+5. [x] Verify selected archive manifests before using any artifact. Preserve failures as failures; never bypass a pin check to make migration succeed.
+6. [x] Review the old lab firmware patch, expanded config and public trust fingerprints. Separate accepted fixes from deliberately omitted revocation and development-only features.
+7. [x] Establish the QEMU threat model and the separate physical-root requirement. Record known untested paths and the limits of historical results.
+8. [x] Create a decision/risk register with named role owners, severity, blocking gate and evidence needed to close each issue.
 9. [ ] Obtain the missing technology/business design document when available; assess changes through review rather than silently changing this scope.
 10. [ ] Confirm legal/clean-room rules and preserve the build team's separation from Firewalla source study. Do not perform physical vendor-image acquisition now.
 
@@ -364,21 +364,21 @@ All implementation checkboxes start open. Existing research results remain histo
 **Depends on:** G0.  
 **Output:** a portable dependency lock and isolated laboratory runner.
 
-1. [ ] Establish the planned repository structure from Section 9. Initialize signed-commit/review policy when repository setup is authorized.
-2. [ ] Add ignore and secret-scanning rules before key generation. Separate source, immutable artifacts and per-device state.
+1. [ ] Establish the planned repository structure from Section 9. Initialize signed-commit/review policy when repository setup is authorized. Git commit signing is temporarily deferred by the owner under ADR 0004; revisit it before G11, without blocking current implementation.
+2. [x] Add ignore and secret-scanning rules before key generation. Separate source, immutable artifacts and per-device state.
 3. [ ] Reuse the firmware source pins and SDK digest from Section 3. Verify available signed tags/releases; record unsigned upstream inputs explicitly.
 4. [ ] Recreate the firmware builder from its immutable digest and archive enough metadata to reproduce it elsewhere. Do not depend only on local Docker image IDs.
 5. [ ] Resolve exact Debian stable snapshot and package closures for host tools, image builder and target. Preserve signed InRelease/Release, package indexes and SHA-256 checks.
 6. [ ] Treat snapshot `Valid-Until` as an explicit historical-snapshot policy. Never use `trusted=yes`, unauthenticated packages or disabled hash validation.
-7. [ ] Pin mkosi, RAUC, dracut, systemd tools, swtpm/libtpms and security libraries. Review known vulnerabilities and license obligations before adopting the inherited snapshot as a new release baseline.
+7. [ ] Pin mkosi, RAUC, dracut, systemd tools, swtpm/libtpms and security libraries. Review known vulnerabilities and license obligations before adopting the inherited snapshot as a new release baseline. Development tools closure and signed snapshot are implemented in `locks/debian-build.json`; portable host/appliance closure and review remain open (see `docs/builder.md`).
 8. [ ] Package builds in dedicated runners/containers. Record required capabilities and mounts; do not grant broad host-disk access or a privileged Docker retry just because a build fails.
 9. [ ] Reproduce EXP-029's good boot and negative controls with matching artifacts, under its original fresh-state profile. If unavailable, record which evidence cannot be reproduced.
 10. [ ] Create a separate **installed-device profile** with persistent OS disk, writable firmware variable store, swtpm state and any required CMOS state across normal reboots.
-11. [ ] Attach one swtpm TPM 2.0 instance per device, initially using the TIS interface compatible with the inherited firmware. Qualify CRB separately if needed; do not assume interchangeability.
-12. [ ] Use persistent flash configured for the actual coreboot/Dasharo layout. Do not assume OVMF's CODE/VARS split applies to this monolithic firmware image.
-13. [ ] Add headless serial evidence and a local-only QMP control socket for automated runs; keep interactive support sessions uncaptured when they could contain recovery secrets.
+11. [x] Attach one swtpm TPM 2.0 instance per device, initially using the TIS interface compatible with the inherited firmware. Qualify CRB separately if needed; do not assume interchangeability. Attachment/cold-boot smoke evidence is in EXP-001; duplicate ACPI probe issue R18 remains open before TPM policy qualification.
+12. [x] Use persistent flash configured for the actual coreboot/Dasharo layout. Do not assume OVMF's CODE/VARS split applies to this monolithic firmware image.
+13. [x] Add headless serial evidence and a local-only QMP control socket for automated runs; keep interactive support sessions uncaptured when they could contain recovery secrets.
 14. [ ] Provide explicit new-device, stop, reboot, power-cut and isolated-snapshot operations. Ordinary boot must never silently reset TPM/NVRAM or re-enroll keys after failure.
-15. [ ] Start without external networking. Later add isolated WAN/LAN virtual networks, an update server and a verifier; never attach test traffic to the office network by default.
+15. [x] Start without external networking. Later add isolated WAN/LAN virtual networks, an update server and a verifier; never attach test traffic to the office network by default.
 16. [ ] Keep TCG as the inherited correctness baseline; qualify KVM as a distinct profile and record different CPU/measurement/performance characteristics.
 
 **Exit gate G1:** clean-host preflight succeeds; baseline behavior is accounted for; a provisioned VM can reboot and cold-start with the same flash/TPM identity. State restoration requires an explicit test action.
@@ -414,7 +414,7 @@ All implementation checkboxes start open. Existing research results remain histo
 **Depends on:** G1; coordinate trust inputs with Phase 2.  
 **Output:** immutable root image, verity tree and deterministic unsigned UKI inputs.
 
-1. [ ] Create a minimal Debian amd64 mkosi recipe using the approved snapshot and exact package lock; avoid recommends unless required and documented.
+1. [ ] Create a minimal Debian amd64 mkosi recipe using the approved snapshot and exact package lock; avoid recommends unless required and documented. A nonbootable, unsigned development probe exists at `image/smoke/mkosi.conf`; it does not satisfy the appliance requirement.
 2. [ ] Build from verified package caches with networking disabled after acquisition. Record installed versions and package/source relationships.
 3. [ ] Use the maintained Debian kernel as a temporary bring-up baseline, then build/qualify the FireArc configuration required by C-02. Archive source, configuration and patches.
 4. [ ] Keep only necessary virtual/physical storage, console, TPM, crypto, network and filesystem support. Document required modules and future G4/G6 drivers instead of trimming them blindly.
@@ -803,7 +803,7 @@ These are minimum categories, not a claim that one run exhaustively covers all c
 
 ## 9. Planned repository and command interface
 
-Only `PLAN.md` is being created for this task. The following are **future implementation paths**, not existing files:
+The implementation is being created incrementally. See [progress](docs/progress.md) for existing/verified components; the tree below is the **target layout**, not a claim that every file/workflow exists:
 
 ```text
 PLAN.md
@@ -1016,4 +1016,4 @@ The PDF and local research are the requirements/compatibility sources. Online do
 - [RAUC handlers, hooks and installation/marking APIs](https://rauc.readthedocs.io/en/latest/using.html).
 - [RAUC signing, verity bundles and data migration](https://rauc.readthedocs.io/en/latest/advanced.html).
 
-**First implementation action after plan approval:** execute Phase 0 and build the portable input/persistent-Q35 harness from the accepted research baseline. Do not start by regenerating old keys, replacing firmware sources or launching a destructive installer.
+**Current implementation action:** Phase 0 documentation/input verification and Phase 1 persistent research harness are underway; see [progress](docs/progress.md). The portable mkosi builder and final installed-device profile remain ahead. Do not regenerate old keys, replace reference sources or launch a destructive installer to bypass an unmet gate.

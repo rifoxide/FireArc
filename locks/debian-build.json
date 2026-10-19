@@ -1,0 +1,43 @@
+{
+  "schema": 1,
+  "snapshot": "20261018T000000Z",
+  "architecture": "amd64",
+  "release": "trixie",
+  "base_image": "docker.io/library/debian@sha256:918311b7b6c4c6f68b232ba516584925f6c78ad82b6fd534b98979df6438e483",
+  "base_config_sha256": "567e3c17b188e21cd42aa5e1c55e16d8270f880ed8ea321dbd40f993467efc4c",
+  "base_image_created": "2026-10-05T00:00:00Z",
+  "base_publisher_signature_verified": false,
+  "metadata_reference": "artifacts/exp-029/plan-tools-b",
+  "keyring_sha256": "506b815cbb32d9b6066b4a2aa524071e071761e7e7f68c3ac74f3061ba852017",
+  "repositories": {
+    "debian": {
+      "suite": "trixie",
+      "inrelease_sha256": "0584fba32e13e0ab8285fb16c27adea1ec03a73669c18702821094fd6ca86675",
+      "release_sha256": "8604eb6fba4e103b48f029f4d945e8c96d07a418b663de8386617d0b78bd3bcf",
+      "packages_sha256": "4f2c68d67001d595fbd343f6dbad44468953a51c4d9dec3a4803249f6e295940"
+    },
+    "debian-security": {
+      "suite": "trixie-security",
+      "inrelease_sha256": "58e1c3a6e868e305500d4a02b4a9eb1f2add3fbcc9a2ea70cd9a4fc60dd3e813",
+      "release_sha256": "eef5f73e245eb6a836fb6e0901e346fb4ff608a2f18cf10f16b4e582cde6dd8e",
+      "packages_sha256": "f5e75cbf6c654c461f16b2296daccf05cf905eb597258aea8953bea0c064fdef"
+    }
+  },
+  "tools": [
+    "mkosi=25.3-7",
+    "systemd=257.13-1~deb13u1",
+    "systemd-boot-efi=257.13-1~deb13u1",
+    "systemd-ukify=257.13-1~deb13u1",
+    "systemd-cryptsetup=257.13-1~deb13u1",
+    "dracut=106-6",
+    "dracut-config-generic=106-6",
+    "rauc=1.13-3+deb13u1",
+    "tpm2-tools=5.7-1",
+    "apt", "apt-utils", "ca-certificates", "cryptsetup-bin", "e2fsprogs",
+    "dosfstools", "mtools", "squashfs-tools", "fdisk", "kmod", "binutils",
+    "openssl", "sbsigntool", "python3", "tar", "xz-utils", "zstd", "gzip",
+    "gpgv", "debian-archive-keyring"
+  ],
+  "historical_valid_until_exception": "Only this fixed snapshot; InRelease signatures, index hashes and package SHA-256 remain mandatory",
+  "scope": "Initial development tools and unsigned root-build smoke test; not security/CVE approval or a production release"
+}

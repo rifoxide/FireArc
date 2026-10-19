@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "purpose": "EXP-029 compatibility baseline; not production security approval",
+  "publisher_signatures_verified": false,
+  "sources": [
+    {"name": "coreboot", "repository": "https://github.com/Dasharo/coreboot.git", "commit": "b8e6b3ebfe33d08b33ac9a2ff4b9ff52ecaaa59b", "reference_path": "run/q35/sources/coreboot"},
+    {"name": "edk2", "repository": "https://github.com/Dasharo/edk2.git", "commit": "e8cd1856408429740b665e72904a07f76d795c70", "reference_path": "run/q35/sources/edk2"},
+    {"name": "vboot", "repository": "https://review.coreboot.org/vboot.git", "commit": "f1f70f46dc5482bb7c654e53ed58d4001e386df2", "reference_path": "run/q35/sources/vboot"},
+    {"name": "brotli", "repository": "https://github.com/google/brotli.git", "commit": "f4153a09f87cbb9c826d8fc12c74642bb2d879ea", "reference_path": "run/q35/sources/brotli"},
+    {"name": "mbedtls", "repository": "https://github.com/ARMmbed/mbedtls.git", "commit": "8c89224991adff88d53cd380f42a2baa36f91454", "reference_path": "run/q35/sources/mbedtls"},
+    {"name": "screenshot", "repository": "https://github.com/LongSoft/CrScreenshotDxe.git", "commit": "cf2fc003bf08a4badc3efe3540c109fa88fb0008", "reference_path": "run/q35/sources/screenshot"},
+    {"name": "mipisyst", "repository": "https://github.com/MIPI-Alliance/public-mipi-sys-t.git", "commit": "370b5944c046bab043dd8b133727b2135af7747a", "reference_path": "run/q35/extra-sources/mipisyst", "edk2_path": "MdePkg/Library/MipiSysTLib/mipisyst"},
+    {"name": "openssl", "repository": "https://github.com/openssl/openssl", "commit": "98acb6b02839c609ef5b837794e08d906d965335", "reference_path": "run/q35/extra-sources/openssl", "edk2_path": "CryptoPkg/Library/OpensslLib/openssl"},
+    {"name": "libspdm", "repository": "https://github.com/DMTF/libspdm.git", "commit": "98ef964e1e9a0c39c7efb67143d3a13a819432e0", "reference_path": "run/q35/extra-sources/libspdm", "edk2_path": "SecurityPkg/DeviceSecurity/SpdmLib/libspdm"}
+  ]
+}

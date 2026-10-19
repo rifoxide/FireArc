@@ -1,0 +1,18 @@
+# Generated builds and per-device state (including software TPM secrets).
+/artifacts/
+/run/
+/.cache/
+/.venv/
+__pycache__/
+*.py[cod]
+.coverage
+
+# Private credentials never belong in this repository. Public .crt/.der/.pem
+# certificates are allowed, but must pass `just secrets` before publication.
+*.key
+*.p12
+*.pfx
+.env
+.env.*
+/secrets/
+/private/
