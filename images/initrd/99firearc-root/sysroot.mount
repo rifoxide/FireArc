@@ -1,0 +1,16 @@
+[Unit]
+Description=FireArc verified read-only root
+DefaultDependencies=no
+Requires=firearc-verify-root.service
+After=firearc-verify-root.service
+Before=initrd-root-fs.target
+OnFailure=firearc-boot-failure.service
+OnFailureJobMode=replace-irreversibly
+FailureAction=poweroff-force
+
+[Mount]
+What=/dev/mapper/firearc-root
+Where=/sysroot
+Type=ext4
+Options=ro,noload
+TimeoutSec=15

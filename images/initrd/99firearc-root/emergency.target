@@ -1,0 +1,5 @@
+[Unit]
+Description=FireArc boot failure (no emergency shell)
+DefaultDependencies=no
+Requires=firearc-boot-failure.service
+After=firearc-boot-failure.service

@@ -1,72 +1,53 @@
-# Initial threat model
+# Threat model
 
-**Scope:** QEMU B/C research, not a production hardware security certification.
+**Scope:** secured boot and atomic updates on Q35 first, with separate physical
+hardware qualification. The development host, hypervisor, build user and Docker
+daemon are trusted. This is not a hostile-host sandbox or hardware certification.
 
-## Assets
+## Assets and adversaries
 
-- Integrity/authorization of firmware, boot manager, UKI, root and updates.
-- Availability of a permitted fallback, including interrupted-update recovery.
-- Confidentiality of persistent device/tenant data and recovery credentials.
-- Per-device identity, fresh attestation and trustworthy release/provisioning logs.
-- Private signing keys and two-person authority over destructive/recovery actions.
+Protect firmware/OS authorization, executable root integrity, device identity,
+encrypted persistent data, update/rollback state and recovery authorization.
+Consider offline disk replacement/modification, ESP tampering, unsigned/wrong-key
+images, rollback to old valid releases, interrupted updates, stolen devices and
+unauthorized recovery. Physical SPI/fuse/ME/TPM attacks require hardware evidence.
 
-## Trusted components in this milestone
+## Build trust
 
-The host OS/user, QEMU and its libraries, approved initial coreboot/EDK II fixture,
-imported signed binaries and their pinned manifests, the harness, and swtpm state
-custody are trusted. Exact hashes detect accidental substitution; the historical
-manifest pins are a reviewed research trust anchor, **not verified publisher
-signatures or proof of source reproducibility**.
+- Git source/configuration/locks are reviewed inputs. Generated artifacts and
+  mutable caches are not upstream authority.
+- The pinned Debian OCI digest is the keyring bootstrap trust anchor. No OCI
+  publisher-signature verification or complete CVE approval is claimed.
+- Debian InRelease signatures authenticate Release/index records; project pins
+  fix snapshot contents. Package sizes/hashes and complete closure fingerprints
+  prevent dependency drift. Historical metadata expiry does not waive signatures.
+- Containers/namespaces prevent accidental host-device/key access; they do not
+  defend against a malicious host, daemon, kernel or authorized build user.
 
-A host administrator can replace firmware, alter tests, clone software-TPM state
-or restore an entire old VM. Ordinary QEMU cannot enforce confidentiality,
-physical-device binding or anti-replay against that administrator.
+## Runtime trust contract
 
-## Attacker capabilities to qualify
+Firmware must enforce the approved UEFI policy, then signed systemd-boot and a
+signed UKI must authenticate the kernel, initramfs and root authority. The initrd
+must fully verify the protected root before a read-only dm-verity mapping/mount.
+Slot/disk/boot-ESP selection must reject ambiguity, and no raw-root fallback or
+unauthenticated shell may bypass that gate.
 
-| Capability | Intended defense | Current foundation |
-| --- | --- | --- |
-| Alter/replace UKI on media | UEFI Secure Boot verification before execution | Regress the historical signed/unsigned/wrong-key/modified controls |
-| Modify root/tree, including coherent substitution | Expected authority in signed UKI; full preverification and runtime dm-verity | Regress all four historical root controls |
-| Supply malformed/traversing/symlinked public inputs | Explicit path allowlists, pinned manifests, regular-file checks, no reference code execution | Offline tests and verified import |
-| Accidentally start/reset wrong device | Validated ID, exclusive device lock, explicit creation, local per-run QMP | No host disk/TPM access or implicit new-device operation |
-| Replay or interrupt an update | Authorized RAUC, inactive-slot writes, finite trials, recovery/security epoch | Future phases; not implemented here |
-| Move encrypted disk to another device | TPM2 policy and independent per-device LUKS material | Future Phase 5; swtpm attachment alone is not proof |
-| Replay attestation or impersonate a device | Enrolled AK, fresh challenge, quote/log/allowlist verification | Future Phase 8 |
-| Use recovery to bypass normal policy | Restricted signed recovery and one-time operation/device authorization | Future Phase 9 |
-| Modify initial physical firmware or abuse SPI/UART/USB | FireArc root ownership, verified regions, flash protections and controlled recovery | Pending hardware; historical fixture has vboot disabled |
+Hashing detects modifications, not confidentiality loss. Persistent data needs
+TPM-bound LUKS2 plus an explicit signed PCR policy, enrollment/rotation handling
+and unique escrow credentials. Signed old images require separate rollback and
+revocation policy. Data schema migrations must preserve authorized rollback.
 
-## Non-negotiable failure behavior
+Recovery/reset/break-glass must be restricted, signed and operation-bound. HSM
+custody, two-person approval and hardware-root/flash protections are independent
+gates, never implied by a successful QEMU or offline build check.
 
-- Never retry an unverified raw root, unsigned UKI or unrestricted initrd shell.
-- A boot failure is not permission to reformat, clear the TPM, reset NVRAM,
-  regenerate keys or change the expected digest.
-- Readiness is not attestation, and host termination after firmware denial is not
-  automatic rollback.
-- Writable encrypted data is not automatically authenticated configuration; do
-  not place trusted executables, units or trust roots under general `/data`.
-- Keep normal data unlock/local rollback independent of network availability.
-- A filesystem rename or VM process kill alone does not prove FAT/SSD/flash
-  power-loss atomicity. It needs a defined fault model and hardware testing.
+## Evidence and private state
 
-## Current runner boundary
+Build output/download/log trees are ignored and privately owned. No private
+signing key or populated device/TPM identity belongs in Git or generic images.
+Future device provisioning/reset must be explicit; ordinary boot must never
+silently recreate identity state. Credential-pattern screening is useful but
+not proof that arbitrary secrets are absent.
 
-The research runner has no VM NIC, host mounts, host TPM passthrough or host
-block-device write. It uses imported public raw images and per-device writable
-flash/qcow2 overlays. Only the pinned SMMSTORE region may differ from the imported
-firmware. All ordinary runs preserve those device files. Negative disk mutations
-are made on per-run copies, never on the imported baseline or reference checkout.
-
-`run/` and `artifacts/` are ignored and 0700. Software-TPM state is private even
-in a lab. Evidence may record public hashes/commands, but never export TPM blobs,
-recovery credentials, private signing keys or captured support sessions.
-
-## Further analysis required
-
-Firmware/vboot/SMMSTORE composition, protected revocation, exact systemd PCR
-phase policies, UKI external inputs, shared-FAT availability, pre-Linux fallback,
-data migration and key rotations are still blocking design/test work. Runtime
-root compromise, DMA, cold-boot and TPM-bus attacks need separate assessment;
-Secure Boot/LUKS do not eliminate them.
-
-See [risks](risks.md). Owner/security review of this initial model is pending.
+Actual acceptance limits are maintained in [progress](progress.md),
+[risks](risks.md) and [validation](validation/README.md).

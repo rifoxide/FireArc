@@ -1,0 +1,11 @@
+[Unit]
+Description=Stop boot after a FireArc integrity or mount failure
+DefaultDependencies=no
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl --no-block --force poweroff
+TimeoutStartSec=10
+StandardInput=null
+StandardOutput=journal+console
+StandardError=journal+console

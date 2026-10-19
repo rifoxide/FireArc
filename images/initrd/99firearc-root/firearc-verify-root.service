@@ -1,0 +1,18 @@
+[Unit]
+Description=FireArc full-root integrity gate
+DefaultDependencies=no
+Wants=systemd-udev-trigger.service
+After=systemd-udev-trigger.service
+Before=sysroot.mount initrd-root-fs.target
+OnFailure=firearc-boot-failure.service
+OnFailureJobMode=replace-irreversibly
+FailureAction=poweroff-force
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/firearc/verify-root
+RemainAfterExit=yes
+TimeoutStartSec=90
+StandardInput=null
+StandardOutput=journal+console
+StandardError=journal+console

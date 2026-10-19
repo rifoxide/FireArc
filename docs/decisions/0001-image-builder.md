@@ -6,7 +6,7 @@
 
 Use mkosi as the new top-level OS builder, with a minimal Debian stable package
 closure pinned to authenticated snapshot metadata and exact package hashes.
-Do not substitute the research project's mmdebstrap pipeline as the final builder.
+The project build interface uses mkosi and pinned Debian packages throughout.
 
 ## Consequences
 

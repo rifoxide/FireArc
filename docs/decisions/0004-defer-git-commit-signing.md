@@ -15,7 +15,7 @@ unsigned during this temporary development exception.
   the authoritative R&D requirements. Revisit signing before release/CI gate G11.
 - This is not authorization to skip firmware, UEFI/systemd-boot/UKI, PCR-policy,
   RAUC, recovery or release-artifact signatures.
-- It does not authorize reuse/access of the old project's private signing keys.
+- It does not authorize additional private-key access or key generation.
 - It does not by itself request a commit or push; current implementation work
   remains local until publication is requested.
 - No Git signing identity/key is created by this decision.

@@ -10,13 +10,13 @@ dated 2026-10-17, 13 pages.
 SHA-256 bab9389d81b9c5bd85b023551fb466ad1d41c7ee0bdb5c9996feefbe56346c49
 ```
 
-`locks/research-baseline.json` pins the PDF. `just verify-inputs` fails if it is
+`locks/specification.json` pins the PDF. `just verify-inputs` fails if it is
 changed without an explicit baseline review. The complete phase/step contract is
 in [PLAN.md](../PLAN.md); IDs here remain stable across implementation changes.
 
 | ID | Required outcome | PDF | Evidence/gate |
 | --- | --- | --- | --- |
-| GOV-01 | Independent development; public inputs; isolated lab | pp. 1–3 | Threat model, reuse inventory, reviewed clean-room/legal boundaries; G0/G1 |
+| GOV-01 | Independent development; public inputs; isolated lab | pp. 1–3 | Threat model, upstream input locks, reviewed clean-room/legal boundaries; G0/G1 |
 | GOV-02 | Signed commits, reproducible CI and artifact storage | p. 3 | Approved signing identity, reviewed CI and release provenance; G1/G11 |
 | B-01 | Record physical Boot Guard/root ownership | p. 5 | Hardware sample report; G13, not QEMU |
 | B-02 | Self-built coreboot/UEFI boot and recovery | p. 5 | Fresh build and recovery evidence; G2/G10/G13 |
@@ -53,7 +53,7 @@ escrow recovery under two-person access; RAUC; coreboot/EDK II and systemd-boot.
    completed physical-root design.
 2. PCR comparison requires the same measurement phase and explained event logs.
    Do not assume every PCR 0–7 changes for every boot-chain modification.
-3. Preserve the research fixture's full protected-root scan before readiness;
+3. Require a full protected-root scan before readiness;
    switching to on-demand-only verification needs a reviewed decision.
 4. Independent deterministic release payloads are separate from randomized device
    provisioning and potentially time-bearing signature envelopes.

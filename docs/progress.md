@@ -1,80 +1,46 @@
 # Implementation progress
 
-**Updated:** 2026-10-19. **Stage:** Phase 0 / Phase 1 foundation, in progress.
+**Updated:** 2026-10-20. **Stage:** build-system restructuring and clean-build
+qualification. The complete secured appliance is not yet implemented.
 
 ## Implemented
 
-- Recorded PDF SHA-256, stable requirements, scope, threat assumptions, accepted
-  user decisions, initial owned-role risks and research reuse inventory.
-- Added ignore rules, repository-only credential screening and offline tests.
-- Recorded the nine inherited source pins, five historical archive-manifest pins,
-  firmware SDK digest and local QEMU/swtpm/mutation-tool compatibility hashes.
-- Added a read-only verifier and curated public import without executing old
-  scripts or reading external private signing keys.
-- Added explicit research-device creation, persistent flash/root/hash state,
-  optional isolated swtpm, exclusive locks, headless runs and local QMP control.
-- Added full acceptance/rejection checks, copied per-run tooling, hashes/commands,
-  retained failure evidence and post-run input/flash/disk/process checks.
-- Added signed Debian snapshot metadata import, exact APT tools planning,
-  size/SHA-256 checked acquisition, offline Docker tools build and public-only
-  tools export with filesystem inventory and interrupted-export recovery.
-- Added a rootless, network-isolated mkosi smoke recipe and tar-content checks.
-  See [builder runbook](builder.md); this output is nonbootable and unsigned.
+- Project-owned source package under `src/firearc/`, image policies under
+  `images/`, a pinned builder under `containers/builder/`, and exact input locks.
+- Label-free build commands, automatic dependency resolution/build IDs,
+  input-sensitive cache invalidation and verified success receipts.
+- Public upstream bootstrap: digest-pinned Debian image/keyring, signed snapshot
+  metadata, complete package-closure fingerprints and size/SHA-256 checks.
+- Offline tools build and rootless mkosi kernel/root/initramfs assembly.
+- Fixed 4 GiB ext4 payload, headerless verity tree and explicit hash/geometry.
+- Initramfs gate with strict embedded authority and slot/command-line checks,
+  same-disk/boot-ESP validation, full preverification, read-only mapping/mount,
+  no raw-root fallback and no-shell failure units.
+- Static embedded-code/unit audit and copied-payload corruption controls.
+- Clean/reproduction commands that rebuild from empty project output directories.
 
-## Verified so far
+## Validation
 
-- Supplied PDF matches its recorded hash.
-- Five historical public manifests and 582 listed files match their pins.
-- All nine source checkouts match exact HEADs and have no tracked changes.
-- The curated import contains only 13 explicit public files plus manifests/report.
-- `just check` passes 66 offline tests, the lock/specification check and known
-  credential-pattern screening.
-- Two non-TPM cold boots, all seven UKI/root negative controls and a final good
-  boot after the negatives passed in the independent persistent-state harness.
-- Two cold boots with the same isolated swtpm-backed research device passed the
-  existing Secure Boot/verified-root acceptance checks. Linux detects TPM 2.0,
-  but also reports a duplicate ACPI TPM resource/probe warning (R18). This is an
-  attachment/persistence smoke result, not measured-boot/data-policy qualification.
-- Missing software-TPM state is refused before a VM starts, without reading or
-  recreating that state. Initialization happens only in explicit device creation.
-- A swtpm/QEMU normal-shutdown race was retained as a failed run and corrected;
-  two new-label cold-boot retests passed on the same unreset device. Guest TPM
-  detection, live QMP status/journaling and process/state checks passed.
-- Evidence and manifest pins: [EXP-001](experiments/EXP-001-foundation.md).
-- Both Debian InRelease signatures and package-index authorization passed;
-  231 planned packages (81,766,752 bytes) were acquired and verified. The tools
-  image built with no network or privileged mode. mkosi 25.3 built a Debian
-  systemd 257.13 nonbootable root tar inside unprivileged namespaces.
-- Two fresh smoke builds produced identical tar/manifest hashes after removing
-  volatile build caches/logs. Selected tar safety checks passed. Same-host/day
-  scope and retained failures: [EXP-002](experiments/EXP-002-builder-smoke.md).
+The label-free bootstrap/build/verification pipeline and 67 offline tests pass.
+The fresh-clone build/verification and both empty-cache reconstruction rounds
+passed component checks. Byte reproducibility failed: ext4/verity/authority
+differed between rounds, and the separate clone also differed in its root tar.
+Diagnosing nondeterministic output remains the next build-system task.
+Results are recorded in [build-system validation](validation/build-system.md)
+and [root validation](validation/appliance-root.md); no unrun clean-build or
+byte-reproducibility result is implied by the implementation list above.
 
-## Gates not closed
+## Next gates
 
-G0 remains pending owner/security review and unavailable external inputs. G1 is
-partial: a portable builder/package closure, fresh source rebuild, installed GPT
-device profile and complete snapshot/control fault coverage are still required.
-Git commit signing is temporarily deferred by the owner under ADR 0004, not a
-current implementation blocker. The regression fixture is not the final appliance.
-The reproduced negative matrix uses persistent flash rather than recreating it
-for every run; the original fresh-flash-per-negative variant remains unrerun.
+1. Finish the clean-download/build/check comparison for the maintained interface.
+2. Assemble slot-specific authority/UKI inputs and qualify the signed boot path,
+   actual systemd/udev scheduling and failure behavior.
+3. Implement the pinned source-built firmware path and qualify firmware trust,
+   authenticated variables and unique TPM ACPI/event-log ownership.
+4. Implement installed A/B storage, TPM-bound LUKS2/escrow, RAUC activation/health/
+   rollback, attestation, restricted recovery and release hardening/SBOM/CI.
 
-Still unimplemented: bootable appliance mkosi build, final kernel/initramfs, systemd-boot, A/B slot
-assessment, TPM data policy/LUKS2/escrow, RAUC integration, health/rollback,
-attestation, restricted recovery, firmware verification/updates/rotation,
-production custody, release CI/SBOM/hardening and hardware qualification.
-
-## Next implementation slice
-
-1. Extend the pinned isolated mkosi/Debian smoke builder to the bootable appliance
-   and its separate package closure. Complete portable host-tool and trust/CVE
-   review; do not silently install host packages or replace inherited dependencies.
-2. Rebuild the root/initramfs/verity payload and install signed systemd-boot in the
-   actual boot path, before claiming the Phase 4 gate.
-3. Resolve R18 in fresh source-built firmware before qualifying measured boot,
-   TPM data policy or remote attestation.
-
-No implementation commits/releases have been made by this milestone. The initial
-documentation commit was pushed earlier. The owner has explicitly deferred Git
-commit signing for now; no key generation or global Git changes are authorized
-or needed. This does not waive any boot/update/release-artifact signature.
+G0/G1/G3 and later acceptance gates remain open. Hardware, legal review,
+production signing custody and external design documents are still dependencies.
+Git commit signing is temporarily deferred under ADR 0004; boot/update/release
+signatures are not waived.

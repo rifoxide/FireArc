@@ -3,9 +3,10 @@
 **Date:** 2026-10-19  
 **Status:** Implementation started: Phase 0/1 foundation. See [progress](docs/progress.md); no completed appliance is claimed.
 **Primary specification:** `FireArc_R-D_Plan—Technical_Team.pdf`, dated 2026-10-17, all 13 pages.  
-**Implementation workspace:** `/home/rifat/projects/firearc`  
-**Read-only research reference:** `/home/rifat/projects/project_firearc`  
+**Implementation workspace:** this repository checkout.
 **Initial target:** x86-64 QEMU Q35; physical reference units and ODM hardware are unavailable.
+
+**Planning addendum:** 2026-10-20; post-boot-chain roadmap and unresolved Firewalla decision added without changing recorded implementation results.
 
 ## 1. Objective and approved decisions
 
@@ -34,8 +35,8 @@ pinned sources and authenticated Debian packages
 | Item | Decision |
 | --- | --- |
 | Development platform | QEMU Q35 until hardware arrives. |
-| Firmware | Source-built coreboot with an EDK II UEFI payload; reuse the successful Dasharo research dependencies initially. |
-| OS image builder | **mkosi**. Existing mmdebstrap research is a reference, not the new top-level image pipeline. |
+| Firmware | Source-built coreboot with an EDK II UEFI payload, using pinned upstream repositories. |
+| OS image builder | **mkosi**, with authenticated, version-locked Debian dependencies. |
 | OS family | Minimal Debian stable, as required by the PDF. |
 | Boot manager | **systemd-boot**, followed by a signed UKI; not direct-UKI boot as the final path. |
 | Immutable OS | Two read-only, dm-verity-protected root slots. |
@@ -50,11 +51,13 @@ The ESP, UKIs, root images and verity trees remain unencrypted. Their integrity 
 
 This is principally **Workstream B: boot chain and firmware** and **Workstream C: FireArc OS base**. Include the interfaces needed by A and H, and a minimal forwarding test fixture needed to measure the PDF's boot/update targets.
 
-Do not expand this task into the full firewall product, IPS/NDR/ML, Firewalla study, cloud console, mobile app, billing, fleet management or production remote-support system. A small test attestation server is required by B; it is not a cloud console.
+Keep the **current implementation milestone** limited to this B/C foundation. Phases 14–19 below describe the subsequent Firewalla-reference and FireArc feature work; they do not authorize starting that implementation before the secure-platform gate. A small test attestation server is required by B; it is not a cloud console. Building the cloud console, mobile app and billing remains outside the PDF's R&D scope.
+
+**Unresolved wording:** the request to “deploy Firewalla” must be reconciled with the PDF's clean-room rule. This plan defaults to studying Firewalla separately and deploying **FireArc's independently implemented behavior** in the secured Debian image. This is a planning assumption, not a newly confirmed user decision. Embedding Firewalla code/configuration in the FireArc product is not authorized; a separate non-shipping Firewalla-on-Debian compatibility study also needs an explicit scope/legal decision. See Phase 14 and Section 12.
 
 Maintain separate completion labels:
 
-1. **Research baseline reproduced:** the existing EXP-029 behavior is reproduced without weakening its checks.
+1. **Clean build reproduced:** a checkout downloads authenticated pinned dependencies and rebuilds project payloads without local artifacts.
 2. **QEMU OS lifecycle qualified:** signed systemd-boot/UKIs, verity, encrypted data, RAUC, health checks, rollback, recovery and test attestation pass on persistent Q35 machines.
 3. **QEMU firmware-verification model qualified:** any claimed verification of mutable coreboot/payload regions is separately demonstrated, rather than inferred from Secure Boot.
 4. **Physical platform qualified:** actual reference units pass firmware-root, TPM, flash, recovery and power-loss tests.
@@ -70,7 +73,7 @@ Use these IDs in architecture decisions, tests and review reports.
 | GOV-01 | Independent development, public/open-source inputs, isolated lab | pp. 1–3 | Phases 0–1; no vendor code/configuration copying. |
 | GOV-02 | Signed commits, reproducible CI builds, artifact storage | p. 3 | Phases 1 and 11. |
 | B-01 | Determine platform-root/Boot Guard ownership | p. 5 | Threat model now; actual fuse/key inspection in Phase 13. |
-| B-02 | Self-built coreboot + UEFI, boot and recovery | p. 5 | Reuse EXP-029; Phases 1–2, 10 and 13. |
+| B-02 | Self-built coreboot + UEFI, boot and recovery | p. 5 | Phases 1–2, 10 and 13. |
 | B-03 | Record ME/CSME state and decide disable/HAP policy | p. 5 | Hardware checklist only; not emulated by Q35. |
 | B-04 | FireArc PK/KEK/db, remove unrelated vendor trust, reject unsigned/modified UKIs | p. 5 | Phases 2 and 4; negative tests throughout. |
 | B-05 | PCR measurements and a TPM quote verified by a test server | p. 5 | Phases 5 and 8. |
@@ -91,6 +94,18 @@ Use these IDs in architecture decisions, tests and review reports.
 | TEST-01 | Reproducible runs with unit, firmware, OS and test-input versions | pp. 11–13 | Evidence format in Section 10. |
 | EXIT-01 | Reviewed outputs and named, owned risks for unmet requirements | p. 13 | Gates and final handoff checklist. |
 
+Follow-on planning coverage does not change the current B/C implementation scope:
+
+| Workstream | Required follow-on output | PDF location | Planned phase |
+| --- | --- | --- | --- |
+| A | G4/G6 board specifications, reference/ODM measurements and three-vendor quotation handoff | pp. 3–5, 13 | Phase 13; physical tests remain hardware-dependent. |
+| D | Reviewed Firewalla parity matrix, plain-language behavior specifications, UX observations and clean-room review log | pp. 2, 7, 13 | Phase 14; separate study team. |
+| E | Measured firewall/IPS reference configuration per model, with explicit failure behavior | pp. 7–8, 12 | Phase 15; QEMU functional evidence, physical performance later. |
+| F | RPZ layout/delivery, bypass handling, NDR events, scale results and commercially usable feeds | pp. 8–9, 12 | Phase 16. |
+| G | Seven initial detections, device/window features, evaluation data and measured false-alert/resource costs | pp. 9–10, 12 | Phase 17. |
+| H | TPM-backed enrollment, selected transport, signed desired state, buffered telemetry, reversible response prototype and protocol specification | pp. 10–11, 13 | Phase 18; test endpoints only, not a production cloud. |
+| Full R&D exit | All PDF deliverables reviewed, reproducible benchmarks and updated named risks | pp. 11–13 | Phase 19; cannot close unavailable hardware/legal evidence. |
+
 **Interpretation notes:**
 
 - PCR stability is conditional on the firmware, boot path, keys, platform configuration and measurement phase. Do not assume every PCR 0–7 is invariant or changes on every modification.
@@ -99,63 +114,24 @@ Use these IDs in architecture decisions, tests and review reports.
 - The PDF prohibits proprietary firmware dumping on p. 2 but requests a private recovery backup on p. 5. Resolve that conflict with the owner and Bangladeshi counsel before any physical backup. No such backup is needed for QEMU work.
 - The referenced technology/business design document was not supplied here. Record it as an external dependency; do not invent additional requirements from it.
 
-## 3. Starting point: reuse the successful research, not its unfinished assumptions
+## 3. Project inputs and clean-build contract
 
-### 3.1 What has been inspected
+Git stores project source, image/firmware configuration, tests and input locks.
+Downloaded packages, source checkouts, VM state, build outputs and signing keys
+do not belong in Git. A clone must be able to acquire all required public inputs
+from the upstream locations recorded in the locks, without another local checkout.
 
-Primary reference:
+`just bootstrap` downloads dependencies explicitly; `just build` resolves stages
+automatically and writes stable aliases under `build/output/`. `just verify-build`
+runs the applicable validation. `just reproduce --yes` removes the generated
+tree and performs two fresh download/build/check cycles, comparing payload hashes.
+Build IDs are automatic internal identifiers, not user-selected command arguments.
 
-```text
-/home/rifat/projects/project_firearc/docs/boot-chain-file-map.md
-```
+### 3.1 Pinned firmware sources
 
-Supporting material inspected for this plan:
-
-```text
-docs/experiments/EXP-029-authenticated-debian-root.md
-configs/q35-sources.tsv
-configs/q35-extra-sources.tsv
-configs/q35-uefi-reduced.defconfig
-artifacts/exp-029/firmware-a/on.config
-artifacts/exp-029/firmware-a/firmware.patch
-artifacts/exp-029/firmware-a/pins.json
-artifacts/exp-029/firmware-a/sdk.json
-artifacts/exp-029/boot-f/command.json
-artifacts/exp-029/validation-a/summary.json
-scripts/debian-uki.py
-justfile
-```
-
-These are historical reports/configuration/evidence, **not a fresh execution or independent revalidation performed while writing this plan**. Do not modify the old project or read/copy its private keys as part of migration.
-
-### 3.2 Reusable baseline and actual gaps
-
-| Area | Existing EXP-029 evidence | New work required |
-| --- | --- | --- |
-| Q35 firmware | Source-built coreboot + Dasharo EDK II with Secure Boot enabled | Portable rebuild; persistent state; firmware-root qualification. |
-| Boot authorization | FireArc-signed UKI; unsigned, wrong-key and modified UKIs rejected | Signed systemd-boot in the actual path; revocation and authenticated key updates. |
-| Root integrity | Signed-in root hash/geometry; full preverification; read-only dm-verity | mkosi implementation, installed GPT layout, two slots and authenticated fallback. |
-| Existing outcomes | Reported two independent cold boots and seven negative controls | Reboot/trial/update/recovery cycles, not just fresh cold boots. |
-| TPM | Build-time TPM/measured-boot options enabled | Actual swtpm attachment, event-log validation, sealing and quotes. |
-| Kernel/userspace | Pinned Debian binary packages; locked-root self-test | FireArc kernel configuration, persistent appliance, hardening and health services. |
-| Data | Temporary runtime state | Per-device LUKS2, escrow, migration and failure handling. |
-| Updates | None in this boot path | RAUC bundles, systemd-boot backend, transaction protocol and rollback. |
-| Recovery | Rejects bad root and powers off | Signed recovery, reset, break-glass and unattended fallback. |
-| Build/release | Local archives, SDK/tool hashes, package inventories | Standalone mkosi pipeline, reproducibility proof, SBOM and release custody. |
-
-Important distinctions from the inspected evidence:
-
-- **systemd-stub is not systemd-boot.** The old UKI boots directly from `EFI/BOOT/BOOTX64.EFI`.
-- `CONFIG_VBOOT_LIB=y` is not firmware verified boot. The expanded configuration has **`CONFIG_VBOOT` disabled**.
-- A measured-boot Kconfig option is not evidence of measurements: the recorded successful launch has **no TPM device attached**.
-- The old firmware patch removes inherited dbx content for a scoped laboratory experiment. That is not an acceptable revocation design for the new lifecycle.
-- Existing firmware uses fresh writable flash copies; the new installed-device profile must preserve its enrolled state.
-- Root userspace uses systemd 257, while the old host-supplied stub is reported as systemd 262. The new pipeline must explicitly qualify and preferably align stub, boot manager, ukify, measurement tools and cryptsetup-facing systemd components.
-- The old full-scan/root-ready demo powers off and has no NIC. Its roughly 29-second execution is not a forwarding-time result.
-
-### 3.3 Initial reusable firmware dependency lock
-
-Start with these exact inputs to avoid unnecessarily rediscovering a working coreboot/UEFI combination. Review security/provenance before promoting them beyond a compatibility baseline.
+The following upstream commits and SDK image are recorded in
+`locks/firmware-sources.json`. Firmware acquisition/build integration and security
+qualification remain separate tasks; a version pin is not a successful build.
 
 | Component | Repository | Commit |
 | --- | --- | --- |
@@ -169,17 +145,18 @@ Start with these exact inputs to avoid unnecessarily rediscovering a working cor
 | OpenSSL | `https://github.com/openssl/openssl` | `98acb6b02839c609ef5b837794e08d906d965335` |
 | libspdm | `https://github.com/DMTF/libspdm.git` | `98ef964e1e9a0c39c7efb67143d3a13a819432e0` |
 
-Additional inherited anchors:
+### 3.2 Build environment and package locks
 
 - Firmware SDK: `coreboot/coreboot-sdk@sha256:181452b3bc89ebc0eedcfc766d116224f0611ea4b5027857c6cfe530f5741a6c`.
-- Existing QEMU machine: `pc-q35-11.1,smm=on`, TCG, `qemu64`, two vCPUs and 1536 MiB RAM. Preserve this as the initial reproduction profile, not the permanent appliance sizing.
-- Existing Debian/security snapshot: `20261018T000000Z`; Debian 13/trixie, 6.12-series kernel and systemd 257 in the root package closure.
-- Exact inherited package versions, sizes and SHA-256 values: `artifacts/exp-029/plan-root-a/packages.json`.
-- Exact inherited host binary hashes: `scripts/debian-uki.py:PINS`. They are compatibility records, not portable package acquisition instructions.
+- Q35/TCG is the initial VM target; provisioned state must persist across boots.
+- Debian/security snapshot: `20261018T000000Z`; Debian 13/trixie, 6.12-series kernel and aligned systemd 257 components.
+- `locks/debian-build.json` records the bootstrap OCI digest, public keyring and signed metadata pins, exact requested tool versions and complete resolved-closure fingerprint.
+- `locks/root.json` records exact root/kernel package versions and the complete root dependency-closure fingerprint.
+- Each resolved package record includes version, architecture, immutable snapshot URL, size and SHA-256 in the generated dependency manifest. Any closure mismatch fails rather than selecting newer packages.
 
-Do not recursively fetch unlisted submodules. Preserve source Git metadata where existing guards depend on commit/cleanliness checks. Source pinning does not establish publisher-signature verification or absence of vulnerabilities.
+Do not recursively fetch unlisted submodules. Source pinning does not establish publisher-signature verification or absence of vulnerabilities.
 
-The new lock must additionally cover mkosi, RAUC, systemd-boot/stub/ukify, dracut, swtpm/libtpms, tpm2-tools/tss, cryptsetup, filesystem tools, signing tools, the builder image and all package metadata. Resolve those versions in Phase 1; do not silently track `latest`.
+The build lock covers mkosi, RAUC, systemd tools, dracut, TPM libraries/tools, cryptsetup, filesystem/signing tools, the builder image and package metadata. Do not silently track `latest`. Complete portable-host, firmware and production custody qualification before closing their gates.
 
 ## 4. Architecture and invariants
 
@@ -204,7 +181,7 @@ Treat privileged runtime compromise, physical TPM bus probing, DMA, cold-boot at
 
 1. Never fall back to an unsigned UKI, unverified raw root or unrestricted emergency shell.
 2. The authorized UKI binds the slot identity, root authority and required security settings.
-3. Verify the entire protected root before normal readiness, preserving the stronger EXP-029 behavior. Measure its boot-time cost separately.
+3. Verify the entire protected root before normal readiness. Measure its boot-time cost separately.
 4. After preverification, runtime root reads still go through dm-verity.
 5. Unlock sensitive persistent data only after the intended authenticated boot/root path has been established.
 6. Update only the inactive root/hash pair; never patch an installed verity root in place.
@@ -337,26 +314,26 @@ Do not put a critical activation check solely in RAUC's system post-install hand
 
 ## 5. Execution phases
 
-Check only steps supported by recorded work/evidence. Existing research results remain historical evidence until reproduced or explicitly accepted with their original limitations. A checked documentation step does not close its independent review gate.
+Check only steps supported by project code and recorded validation. A checked documentation step does not close its independent review gate.
 
-### Phase 0 — Freeze requirements, preserve the baseline and record decisions
+### Phase 0 — Freeze requirements, pin inputs and record decisions
 
 **Owner:** platform lead + firmware engineer + security reviewer.  
-**Depends on:** supplied PDF and existing research.  
-**Output:** requirements baseline, reusable-input inventory and approved threat model.
+**Depends on:** supplied PDF and approved architecture decisions.
+**Output:** requirements, upstream input locks and approved threat model.
 
 1. [x] Record the PDF hash, date, requirement IDs and B/C scope in `docs/requirements.md`.
 2. [x] Record the user's mkosi, data-only encryption and escrow decisions as ADRs.
-3. [x] Inventory the old research's source/configuration/public artifact references without changing them.
+3. [x] Record upstream repository URLs, exact commits, package versions, snapshot and artifact digest pins.
 4. [x] Identify dependencies hidden by `.gitignore`: sources, downloaded packages, archives, SDK images and patched build copies are not included in a Git clone.
-5. [x] Verify selected archive manifests before using any artifact. Preserve failures as failures; never bypass a pin check to make migration succeed.
-6. [x] Review the old lab firmware patch, expanded config and public trust fingerprints. Separate accepted fixes from deliberately omitted revocation and development-only features.
-7. [x] Establish the QEMU threat model and the separate physical-root requirement. Record known untested paths and the limits of historical results.
+5. [x] Verify metadata signatures and SHA-256 authority before using downloaded artifacts. Never bypass a pin check to make a build succeed.
+6. [ ] Review firmware configuration, patches and public trust policy before building or enrolling trust.
+7. [x] Establish the QEMU threat model and the separate physical-root requirement. Record untested paths and qualification limits.
 8. [x] Create a decision/risk register with named role owners, severity, blocking gate and evidence needed to close each issue.
 9. [ ] Obtain the missing technology/business design document when available; assess changes through review rather than silently changing this scope.
 10. [ ] Confirm legal/clean-room rules and preserve the build team's separation from Firewalla source study. Do not perform physical vendor-image acquisition now.
 
-**Exit gate G0:** requirements, threat model, reuse inventory and scope reviewed. No private-key transfer or destructive migration required.
+**Exit gate G0:** requirements, threat model, upstream input locks and scope reviewed. No private-key transfer is required.
 
 ### Phase 1 — Standalone workspace, pinned builders and persistent Q35 harness
 
@@ -370,18 +347,18 @@ Check only steps supported by recorded work/evidence. Existing research results 
 4. [ ] Recreate the firmware builder from its immutable digest and archive enough metadata to reproduce it elsewhere. Do not depend only on local Docker image IDs.
 5. [ ] Resolve exact Debian stable snapshot and package closures for host tools, image builder and target. Preserve signed InRelease/Release, package indexes and SHA-256 checks.
 6. [ ] Treat snapshot `Valid-Until` as an explicit historical-snapshot policy. Never use `trusted=yes`, unauthenticated packages or disabled hash validation.
-7. [ ] Pin mkosi, RAUC, dracut, systemd tools, swtpm/libtpms and security libraries. Review known vulnerabilities and license obligations before adopting the inherited snapshot as a new release baseline. Development tools closure and signed snapshot are implemented in `locks/debian-build.json`; portable host/appliance closure and review remain open (see `docs/builder.md`).
+7. [ ] Pin mkosi, RAUC, dracut, systemd tools, swtpm/libtpms and security libraries. Review known vulnerabilities and license obligations before release. Tool/root closure fingerprints and signed snapshot pins are implemented in the input locks; portable host/firmware qualification and security review remain open (see `docs/builder.md`).
 8. [ ] Package builds in dedicated runners/containers. Record required capabilities and mounts; do not grant broad host-disk access or a privileged Docker retry just because a build fails.
-9. [ ] Reproduce EXP-029's good boot and negative controls with matching artifacts, under its original fresh-state profile. If unavailable, record which evidence cannot be reproduced.
+9. [ ] Qualify the project firmware/OS boot path and signature/root corruption controls using binaries built from this checkout.
 10. [ ] Create a separate **installed-device profile** with persistent OS disk, writable firmware variable store, swtpm state and any required CMOS state across normal reboots.
-11. [x] Attach one swtpm TPM 2.0 instance per device, initially using the TIS interface compatible with the inherited firmware. Qualify CRB separately if needed; do not assume interchangeability. Attachment/cold-boot smoke evidence is in EXP-001; duplicate ACPI probe issue R18 remains open before TPM policy qualification.
-12. [x] Use persistent flash configured for the actual coreboot/Dasharo layout. Do not assume OVMF's CODE/VARS split applies to this monolithic firmware image.
-13. [x] Add headless serial evidence and a local-only QMP control socket for automated runs; keep interactive support sessions uncaptured when they could contain recovery secrets.
+11. [ ] Attach one isolated swtpm TPM 2.0 instance per provisioned device. Qualify TIS/CRB and ACPI ownership; do not assume interchangeability or permit duplicate TPM resources.
+12. [ ] Use persistent flash configured for the actual coreboot/Dasharo layout. Do not assume OVMF's CODE/VARS split applies to this monolithic firmware image.
+13. [ ] Add headless serial evidence and a local-only QMP control socket for automated runs; keep interactive support sessions uncaptured when they could contain recovery secrets.
 14. [ ] Provide explicit new-device, stop, reboot, power-cut and isolated-snapshot operations. Ordinary boot must never silently reset TPM/NVRAM or re-enroll keys after failure.
-15. [x] Start without external networking. Later add isolated WAN/LAN virtual networks, an update server and a verifier; never attach test traffic to the office network by default.
-16. [ ] Keep TCG as the inherited correctness baseline; qualify KVM as a distinct profile and record different CPU/measurement/performance characteristics.
+15. [ ] Start without external VM networking. Later add isolated WAN/LAN virtual networks, an update server and a verifier; never attach test traffic to the office network by default.
+16. [ ] Use TCG for initial correctness; qualify KVM as a distinct profile and record different CPU/measurement/performance characteristics.
 
-**Exit gate G1:** clean-host preflight succeeds; baseline behavior is accounted for; a provisioned VM can reboot and cold-start with the same flash/TPM identity. State restoration requires an explicit test action.
+**Exit gate G1:** clean-clone builds pass; a provisioned VM can reboot and cold-start with the same flash/TPM identity. State restoration requires an explicit test action.
 
 ### Phase 2 — Rebuild firmware and establish FireArc trust ownership
 
@@ -389,14 +366,14 @@ Check only steps supported by recorded work/evidence. Existing research results 
 **Depends on:** G1.  
 **Output:** self-built enforcement-on firmware, documented firmware-root model and key procedures.
 
-1. [ ] Build coreboot and the Dasharo EDK II payload from the inherited pins and reviewed patch in a fresh offline workspace.
+1. [ ] Build coreboot and the Dasharo EDK II payload from pinned upstream commits and reviewed project configuration in a fresh offline workspace.
 2. [ ] Archive expanded Kconfig, payload DSC/FDF, patches, CBFS/FMAP map, compiler hashes, build commands and complete dependency manifest.
 3. [ ] Inspect firmware layout and identify code, SMMSTORE, boot-selection state and preserved regions. Verify writes land only where intended in the baseline tests.
 4. [ ] Separate the initial trusted-firmware laboratory profile from any firmware-verification profile. A detached signature checked by the launcher authenticates cold-start input; it is not guest-enforced verification on every reset.
 5. [ ] Investigate the pinned Q35 coreboot vboot support for an emulator model of protected RO verification of mutable firmware/payload regions. Check FMAP capacity, SMMSTORE placement, TPM usage, recovery payload and boot-state compatibility before adopting it.
 6. [ ] If that model is used, sign the firmware's actual verified regions using the correct vboot tooling; test modified/wrong-key payload rejection before payload execution. Merely signing a ROM file with a PE/UKI signing tool is not firmware verified boot.
 7. [ ] State exactly how the initial RO verifier is trusted/protected in QEMU. If host enforcement is the only anchor, retain that limitation and do not claim real hardware protection or resistance to a malicious host.
-8. [ ] Define separate development and production trust domains. The EXP-029 30-day RSA-2048 credentials remain historical laboratory trust; do not silently adopt them as production credentials.
+8. [ ] Define separate development and production trust domains. Development credentials do not qualify production custody.
 9. [ ] Define distinct key roles: firmware authorization, UEFI PK, KEK, EFI-image signing/db, RAUC bundle signing, PCR-policy signing, recovery authorization and device CA/attestation identity.
 10. [ ] Design the PDF's offline-root/HSM/two-person ceremony. Software tokens may rehearse interfaces but cannot satisfy a claim of hardware-backed production custody.
 11. [ ] Generate a new approved development hierarchy outside source/build trees; expose only public certificates to firmware builds and only the required private key to an isolated signing step.
@@ -414,16 +391,16 @@ Check only steps supported by recorded work/evidence. Existing research results 
 **Depends on:** G1; coordinate trust inputs with Phase 2.  
 **Output:** immutable root image, verity tree and deterministic unsigned UKI inputs.
 
-1. [ ] Create a minimal Debian amd64 mkosi recipe using the approved snapshot and exact package lock; avoid recommends unless required and documented. A nonbootable, unsigned development probe exists at `image/smoke/mkosi.conf`; it does not satisfy the appliance requirement.
+1. [ ] Create a minimal Debian amd64 mkosi recipe using the approved snapshot and exact package lock; avoid recommends unless required and documented. `images/root/` builds unsigned kernel/initramfs/EFI inputs from the root closure; signed boot qualification remains pending.
 2. [ ] Build from verified package caches with networking disabled after acquisition. Record installed versions and package/source relationships.
 3. [ ] Use the maintained Debian kernel as a temporary bring-up baseline, then build/qualify the FireArc configuration required by C-02. Archive source, configuration and patches.
 4. [ ] Keep only necessary virtual/physical storage, console, TPM, crypto, network and filesystem support. Document required modules and future G4/G6 drivers instead of trimming them blindly.
 5. [ ] Include EFI stub, dm-verity, dm-crypt, LUKS crypto support, TPM2, loop, SquashFS and RAUC dependencies. Add NBD only if streaming is later enabled.
 6. [ ] Require signed/approved modules and enforce the intended kernel lockdown policy. Test unsigned module and kexec/debug interfaces; do not rely solely on a boot-time status string.
 7. [ ] Select and pin systemd-based dracut initramfs generation. Include every early-boot tool/module needed for root verification, PCR policy, TPM2 unlock and controlled failure.
-8. [ ] Port the old full-root verification behavior: expected hash, salt and geometry must originate inside signed UKI content, not a mutable verity superblock or ESP metadata file.
+8. [ ] Port the old full-root verification behavior: expected hash, salt and geometry must originate inside signed UKI content, not a mutable verity superblock or ESP metadata file. Project-owned dracut gate, strict authority renderer/parser, static audit and synthetic failure tests are implemented (`docs/initramfs.md`); signed authority embedding and boot qualification remain pending.
 9. [ ] Generate the final ext4 root offline, with deterministic timestamps, UUID policy, ordering and image size. No machine identity, generated password, host SSH key or runtime entropy file belongs in the generic image.
-10. [ ] Generate a separate SHA-256 verity tree over the documented full protected range. Use a reproducible public salt policy and archive all geometry and digest inputs.
+10. [x] Generate a separate SHA-256 verity tree over the documented full protected range. Use a reproducible public salt policy and archive all geometry and digest inputs. Implemented for the frozen 4 GiB payload by `image-rootfs`; userspace verification/corruption checks passed (see `docs/validation/appliance-root.md`). This does not close authenticated boot or filesystem reproducibility gates.
 11. [ ] Build slot-specific UKI inputs only after the final root bytes are frozen. Never modify root content after computing verity or add files in a post-install writable mount.
 12. [ ] Before root mounting, perform full verification, then open the read-only verity mapping. Test both preverification and runtime corruption paths.
 13. [ ] Replace the old poweroff-only rejection path with a bounded authenticated fallback interface, initially in an isolated test profile; no raw-root retry or unrestricted initrd shell.
@@ -441,7 +418,7 @@ Check only steps supported by recorded work/evidence. Existing research results 
 
 1. [ ] Implement deterministic image assembly for the proposed GPT layout. Freeze labels, sizes, partition types, alignment and layout version after capacity checks.
 2. [ ] Provision test root/hash pairs for both slots. Resolve devices through validated same-disk identities and reject ambiguous enumeration.
-3. [ ] Align/qualify systemd-boot, systemd-stub, ukify, measurement tools and target cryptsetup-related systemd versions. Replace inherited host-path dependency with pinned builder inputs.
+3. [ ] Align/qualify systemd-boot, systemd-stub, ukify, measurement tools and target cryptsetup-related systemd versions using pinned builder inputs.
 4. [ ] Build UKIs with ukify and inspect every embedded section. Include signed root authority and `rauc.slot=` for the actual slot.
    - Final pipeline, once Phase 5 adds PCR authorization: freeze root -> generate verity -> finalize kernel/initramfs/command-line/public-policy inputs -> calculate/sign the intended PCR states -> embed PCR signatures -> apply the final PE signature. Use ukify's supported measurement rules to avoid circular signing; never alter covered sections afterward. Rebuild all dependent signatures if any input changes.
 5. [ ] Sign the boot manager and both UKIs with approved EFI-image signing credentials; verify signatures before image assembly.
@@ -582,7 +559,7 @@ Check only steps supported by recorded work/evidence. Existing research results 
 **Output:** separately qualified firmware/key lifecycle and an explicit rollback window.
 
 1. [ ] Define firmware release identity, board compatibility, signed region hashes, minimum supported version and preserved flash regions.
-2. [ ] Select a delivery mechanism actually supported by the pinned coreboot/EDK II combination: authenticated capsule or a reviewed FireArc-signed flashing workflow. The inherited configuration has capsule updates disabled; do not assume fwupd integration already exists.
+2. [ ] Select a delivery mechanism actually supported by the pinned coreboot/EDK II combination: authenticated capsule or a reviewed FireArc-signed flashing workflow. Do not assume capsule/fwupd integration exists without a build and validation result.
 3. [ ] For a QEMU host-side update prototype, verify the signed firmware artifact before applying it and explicitly label the host-trusted boundary. This alone is not guest-enforced flash authentication.
 4. [ ] If using vboot/protected firmware regions, update and verify the intended mutable region while preserving the root verifier, SMMSTORE, provisioning identity and rollback state.
 5. [ ] Ensure mutable firmware verification covers the actual UEFI payload and relevant coreboot stages/configuration. A payload hash printed by the OS is not equivalent to rejection before execution.
@@ -646,7 +623,7 @@ Check only steps supported by recorded work/evidence. Existing research results 
 13. [ ] Measure power-on to first forwarding against **60 seconds**. Break down firmware, boot manager, full verity scan, TPM unlock and service readiness.
 14. [ ] Measure last successful pre-reboot forwarding to first successful post-update forwarding against **120 seconds**. Report staging/download time, healthy-update downtime and failed-update recovery separately.
 15. [ ] Report TCG/KVM environment and repeated-run distributions, not only the best observation. VM timing is not G4/G6 throughput, thermal, SSD or real watchdog qualification.
-16. [ ] If full-root scanning misses the time budget, optimize and remeasure first. Changing to on-demand-only verification would change the stronger inherited requirement and needs an explicit ADR/user review.
+16. [ ] If full-root scanning misses the time budget, optimize and remeasure first. Changing to on-demand-only verification changes the full-scan requirement and needs an explicit ADR/user review.
 17. [ ] Publish a reproducible demo runbook, test report, final release manifest and all unresolved risks with owners. Distinguish untested, failed, simulated and passing cases.
 
 **Exit gate G12:** QEMU lifecycle acceptance passes without signature bypasses, manual rollback or hidden state resets. Unmet targets and unavailable physical evidence remain visible, not declared complete.
@@ -672,8 +649,161 @@ Check only steps supported by recorded work/evidence. Existing research results 
 13. [ ] Decide/test ME HAP/disable policy only where documented/supported for the exact model, with stability and recovery evidence.
 14. [ ] Deliver ODM firmware requirements: FireArc root-key control, discrete TPM2, recovery header/socket strategy, console, protected flash, signed updates and key/provisioning ownership.
 15. [ ] Review hardware-pending risks at the PDF's final R&D gate. Anything unmet stays a named build-plan risk with an owner.
+16. [ ] Complete Workstream A's non-invasive inventory on stock units: archive `lspci -vvnn`, `lsusb -v`, `dmidecode`, `lscpu`, per-NIC `ethtool -i/-k/-l`, `sensors`, `nvme id-ctrl` and `tpm2_getcap properties-fixed`. Record PCIe lanes, queues, interfaces and component identities.
+17. [ ] Teardown only the designated probe unit: photograph both board sides, identify SoC/NIC/EC/flash/TPM/power/RAM components, and map approved UART/test points. Keep the stock reference unchanged.
+18. [ ] Run the PDF's eight-hour CPU/IPS thermal load at 40 °C ambient with controlled, safe equipment. Record temperature, throttling and wall power; confirm the fanless requirement rather than inferring it from a short benchmark.
+19. [ ] Measure RSS queues, offloads, driver versions and AF_XDP zero-copy support on actual NICs; qualify sustained 2.5G/10G links. Repeat on each ODM sample under the same methodology.
+20. [ ] Execute the 500-cycle relay power/reliability campaign and brown-out recovery tests with the hardware team, preserving every failure and the firmware/OS version used.
+21. [ ] Produce G4/G6 quote-ready board specifications for three Shenzhen ODMs: required CPU/AES-NI class, Intel NICs/no Realtek, discrete TPM2, at least 16 MiB SPI flash with recovery access, FireArc firmware authority, serial console, thermal/power limits, three-year component availability and six-month EOL notice. Mark every unmeasured sample requirement pending.
 
 **Exit gate G13:** actual units meet the applicable PDF firmware/OS criteria. Until then, production hardware-root and physical recovery claims remain pending.
+
+### Phase 14 — After secure-platform qualification: Firewalla study and clean-room handoff
+
+**Owner:** separate product analyst + network engineer study team; independent reviewer.
+
+**Depends on:** G12 for the user's requested post-boot-chain sequence; legal approval before reference-device/source study. Physical observations also require the reference units.
+
+**Output:** reviewed behavior specifications, parity matrix, UX findings and auditable separation from FireArc implementation.
+
+Phase 13 is a hardware-arrival branch, not a reason to stop all virtual follow-on work. The approved QEMU platform can support Phases 14–18 while physical qualification is pending, but must not be described as a production hardware-secure appliance.
+
+1. [ ] Ask the owner to resolve the Firewalla scope checkpoint in Section 12. Until answered, plan only separate study and independent FireArc implementation; do not add Firewalla packages, services, source or configuration to the product image.
+2. [ ] Obtain Bangladeshi counsel's sign-off on the PDF's reference-device, source-study and clean-room ground rules. Review applicable vendor account/service terms separately.
+3. [ ] Establish separate study and implementation workspaces, permissions and personnel. Study-team source access must not expose build teams E–H to Firewalla source, code structure or copied configuration.
+4. [ ] Use the Gold SE and Purple SE reference devices on the isolated laboratory network when available. Record model, software/app version, entitlement and observation date for each finding.
+5. [ ] If a separate Debian study image is explicitly requested and approved, first assess platform dependencies, supported architecture, runtime/kernel expectations, licensing and legitimate service access. Treat portability as unproven; do not assume cloning the public box repository yields a working appliance or authorized vendor-cloud integration.
+6. [ ] Record setup and supported router, simple/transparent and DHCP-style modes: defaults, screens, timing, prerequisites, failure behavior and points where a non-expert gets stuck.
+7. [ ] Inventory observable features, supported tiers/models, limits and priorities. Create the parity matrix with FireArc equivalent, acceptance test, intended release and known gap; do not invent support on a model that was not tested.
+8. [ ] Drive the PDF's scenarios: device join, known-bad domain, large upload, internal scan, blocked application, scheduled pause, VPN and WAN failover. Record alert timing/content and available response/undo actions in plain language.
+9. [ ] Observe cloud-contact metadata only on the owned laboratory network: destination, timing and volume. Do not decrypt protected traffic, bypass authentication, attack vendor APIs or claim that the reference cloud is under FireArc's control.
+10. [ ] Benchmark enabled/disabled feature combinations with the shared test methodology. Reference-hardware numbers are not substitutes for later FireArc model measurements.
+11. [ ] Permit public Firewalla source reading only within the study-team role and legal policy. Transfer conclusions as observable behavior, never source snippets, internal code organization, rule content or vendor assets.
+12. [ ] Have the independent reviewer reject contaminated specifications and retain the review history. Each approved specification must describe inputs, outputs, defaults, timing, exceptions and black-box acceptance tests.
+13. [ ] Capture UX/localization opportunities and product gaps: South Asian SME workflows, languages, partner-managed setup, accessible alerts, multi-tenancy, NDR depth, SOC handoff and local data. Describe requirements rather than copying interface assets.
+14. [ ] Hand only reviewed specifications to the FireArc build teams. If personnel cannot satisfy the PDF's separation, stop source-based study and resolve staffing/counsel policy; do not silently waive the clean-room boundary.
+
+**Exit gate G14:** the parity matrix and behavior specifications are reviewed and handed over with a clean-room log. Missing reference units produce explicit blocked observations, not fabricated device results. Direct Firewalla embedding remains excluded without a formally approved deviation.
+
+### Phase 15 — Independent FireArc data plane and IPS on the secured Debian base
+
+**Owner:** network engineer + detection engineer, using approved specifications/public standards only.
+
+**Depends on:** G12 and reviewed specifications relevant to the feature being implemented.
+
+**Output:** original policy compiler, functional routing/IPS prototype and per-model configuration candidates.
+
+1. [ ] Define typed device/zone/policy schemas and their version/compatibility rules. Generate nftables zones, sets and maps from that model; do not make hand-edited live rules the source of truth.
+2. [ ] Implement a minimal routed WAN/LAN profile with explicit management isolation, IPv4/IPv6 policy, NAT where needed and deterministic interface assignment. Test allowed and denied traffic through independent endpoints.
+3. [ ] Apply configuration transactionally: validate syntax/resources, stage the generation, switch atomically where supported, test local health and retain the previous generation for undo.
+4. [ ] Add multi-WAN policy routing, SLA probes and failover tests. Compare CAKE and fq_codel using recorded traffic/resource conditions, rather than assuming one configuration fits every model.
+5. [ ] Add WireGuard and strongSwan interoperability scenarios; persist credentials only in encrypted state or TPM-backed storage as appropriate. Review kernel/userspace privileges and secret exposure.
+6. [ ] Establish the G4 routed NFQUEUE candidate. Test queue fanout, queue-per-CPU allocation and the documented consequences of listener failure with bypass enabled versus disabled.
+7. [ ] Establish AF_PACKET inline candidates for G4/G6. Qualify paired MTUs, required GRO/LRO/TSO settings, stream inline mode and the actual multithreaded distribution mechanism supported by the pinned Suricata version.
+8. [ ] Evaluate G6 DPDK inline only as the PDF's stretch goal, with supported paired NICs and pinned dedicated cores. Evaluate AF_XDP/zero-copy and Hyperscan on actual supported drivers; virtio results cannot establish Intel NIC zero-copy support.
+9. [ ] Start with legitimately licensed Emerging Threats Open content. Define an original FireArc rule-pack format, provenance, categories, tenant selection and suppression handling; do not import Firewalla/vendor rule content.
+10. [ ] Profile rule cost, investigate the highest-cost 5% and record any disable/rewrite decision with detection-regression results. Performance gains do not justify silently removing required coverage.
+11. [ ] Specify and test fail-open/fail-closed behavior per model when Suricata stops, queues saturate, interfaces flap or configuration fails. Set the default with product/security approval.
+12. [ ] Qualify flowtable acceleration only for eligible already-inspected traffic. Prove it does not unintentionally bypass continuing IPS or required telemetry; leave it disabled for flows needing continued inspection.
+13. [ ] Package code, configurations and required signed modules through mkosi -> verity -> UKI -> signed RAUC. Never install feature binaries into a mutable root or download executable plugins into general data storage.
+14. [ ] Extend health checks and AppArmor/seccomp/systemd restrictions for the real services. Test resource exhaustion, bad rule packs, rollback and shared-state compatibility without weakening G0–G12.
+15. [ ] Compare modes with the same SME/IMIX/attack inputs on each physical model when available. Select the reference configuration using measured throughput, loss, latency, detection and failure behavior; QEMU establishes functionality only.
+
+**Exit gate G15:** the independently implemented policy/data-plane prototype passes functional and failure tests on the secure base. Model-specific IPS selection remains pending until comparable physical benchmark evidence exists.
+
+### Phase 16 — DNS security, RPZ delivery and NDR event interfaces
+
+**Owner:** network engineer, shared with Phase 15; feed-license reviewer.
+
+**Depends on:** secured image/update lifecycle and the relevant reviewed DNS/policy specifications.
+
+**Output:** reproducible Unbound/RPZ configuration, signed delivery prototype, structured DNS events and feed-license register.
+
+1. [ ] Pin Unbound and verify the required RPZ features in that version. Test QNAME, client-IP, response-IP, NSDNAME and NSIP triggers and required NXDOMAIN/NODATA/PASSTHRU/DROP/TCP-only/local-data actions.
+2. [ ] Define and test evaluation order: allow-list/PASSTHRU -> FireArc threat intelligence -> partner/tenant custom -> category filtering -> ads. Include overlaps and exceptions; do not assume the intended order from configuration appearance alone.
+3. [ ] Use supported tags/views/access controls to apply device-group policies. Test tenant/group isolation, device reclassification and conflicting allow/deny entries.
+4. [ ] Prototype IXFR and authenticated signed HTTPS zone delivery. Verify publisher authority, version/freshness, full content and parser limits before atomically replacing the active zone; transport encryption alone is not a signed release policy.
+5. [ ] Reject malformed, oversized, unauthorized and stale/replayed zone versions; retain a valid prior zone across interrupted download, reload and update-server outage.
+6. [ ] Measure publish-to-enforcement time across the test fleet, targeting under five minutes. Record polling, transfer, verification and reload time separately; do not label a local file copy as fleet propagation.
+7. [ ] Build an original localized block-explanation page and request-unblock workflow contract. Document that redirecting arbitrary HTTPS names will produce certificate/HSTS limitations; do not solve that with silent TLS interception or a misleading universal-page claim.
+8. [ ] Test policy for intercepting outbound port 53, blocking unauthorized DoT and known DoH endpoints, and identifying repeated bypass attempts. Include IPv6, alternate ports, shared-hosting conflicts and exceptions; acknowledge that endpoint lists cannot block every encrypted resolver/tunnel.
+9. [ ] Emit bounded structured query/RPZ events with device identity, timestamps, query/result, policy action and zone label. Define minimization, retention, backpressure and loss counters for NDR and future telemetry.
+10. [ ] Review commercial-use/redistribution terms for abuse.ch feeds, Spamhaus, phishing feeds, newly registered domains and categories. Record owner, source, terms, update method and any required commercial agreement before shipping.
+11. [ ] Load-test one to five million RPZ entries on G4 hardware; record memory, reload duration and query-latency distributions under normal/attack traffic. Use QEMU for functional/load-harness development, not G4 capacity certification.
+12. [ ] Include zone-update and DNS-service health in rollback decisions without making a temporary feed/cloud outage an OS boot failure. Package executable changes only through the signed image lifecycle.
+
+**Exit gate G16:** RPZ order/group isolation, authenticated delivery, bypass policy, event output and failure recovery are demonstrated; feed licensing and hardware scale results are reviewed or explicitly pending.
+
+### Phase 17 — Device inventory, NDR features and the first seven detections
+
+**Owner:** detection engineer + data scientist; no Firewalla source access.
+
+**Depends on:** relevant reviewed specifications, Phase 15 traffic events and Phase 16 DNS events.
+
+**Output:** transparent baseline detections, reproducible evaluation and resource budgets.
+
+1. [ ] Evaluate Zeek connection/DNS/TLS/HTTP/SMB/Kerberos logging on G4/G6; record CPU/memory cost per traffic rate. Preserve the PDF's Suricata EVE fallback for constrained G2 scope without inventing a G2 hardware specification.
+2. [ ] Define original structured events and device correlation from DHCP, addresses, vendor/type evidence and supported fingerprints including JA4/JA4S and HTTP user-agent. Review fingerprint implementation/data licensing and uncertainty handling.
+3. [ ] Build a small Go or Rust feature daemon with bounded per-device time windows: destinations, byte counts, periodicity, DNS entropy, new ports and internal fan-out. Document windowing, restart persistence, clock corrections and event-loss behavior.
+4. [ ] Implement C2 beaconing using interval-jitter scoring over the PDF's one-to-24-hour windows, with rare-destination context and explainable evidence.
+5. [ ] Implement DGA scoring with character n-grams plus per-device NXDOMAIN rates; retain the simple baseline before considering learned models.
+6. [ ] Implement internal scanning/lateral-movement alerts from host/port fan-out against the device baseline, with expected infrastructure/scanner exceptions.
+7. [ ] Implement potential data exfiltration from unusual upload volume to a new destination using robust per-device baselines/z-scores; expose the observation, not an unsupported claim of confirmed theft.
+8. [ ] Implement rare destination from site-level first-seen domain/ASN frequency, ransomware-over-SMB from observable SMB write/rename bursts, and rogue/new-device detection from inventory differences. Record encrypted/protocol-visibility limits.
+9. [ ] Prepare development/test splits from legitimate public labeled datasets such as CIC-IDS2017 and CTU-13 plus isolated lab scenarios. Record provenance, labels, scenario overlap and limitations; never execute malware on internet-connected lab hosts.
+10. [ ] Obtain written consent and capture at least two weeks of baseline traffic from three friendly SME offices as specified in the PDF. De-identify/minimize data and restrict access; without this evidence, field false-alert acceptance remains pending.
+11. [ ] Measure each of the seven detections separately: detection rate, false alerts per device per week, time to detect, CPU and memory. Have Product set the false-alert threshold before judging results.
+12. [ ] Add gradient boosting/isolation forest and ONNX Runtime only where a controlled comparison beats the transparent baseline on held-out data within device budgets. Authenticate model releases, limit parser/resources and preserve a known-good model/configuration.
+13. [ ] Define the incident record for future cloud analysis: detection, evidence and device context with names/internal IPs tokenized. Building the cloud LLM/console is not part of this prototype.
+14. [ ] Package sensors/daemon/runtime through the secure OS pipeline, apply service confinement and extend health/rollback tests. Persist bounded features/configuration only in approved encrypted state paths.
+
+**Exit gate G17:** all seven initial detections run with reproducible scenario-level evidence. QEMU functional success alone does not close SME false-alert, G4/G6 resource or production detection-quality requirements.
+
+### Phase 18 — arcd enrollment, signed configuration and reversible response prototype
+
+**Owner:** two backend engineers, building from reviewed behavior/protocol requirements.
+
+**Depends on:** secure platform/TPM identity, data-plane and DNS control interfaces, and the required telemetry/event schemas.
+
+**Output:** agent protocol specification, response catalog and end-to-end prototype against laboratory endpoints.
+
+1. [ ] Generate each device's authentication key inside the TPM during explicit provisioning and enroll it with a test device CA. Separate mTLS identity from attestation-key roles and prove non-exportable use at the stated TPM boundary.
+2. [ ] Use outbound mutually authenticated connections only; expose no inbound WAN management ports. Test renewal, revoked/unknown identity and safe recovery after identity/TPM replacement.
+3. [ ] Compare gRPC streaming and MQTT over mTLS behind NAT/CGNAT, on weak/intermittent links and after 24 hours offline. Record reconnect behavior, bandwidth, session state and authentication before choosing one in an ADR.
+4. [ ] Define a signed, versioned desired-state bundle independent of transport security. Verify signer, target device/tenant, schema, version/freshness and resource limits before processing; retain the last accepted state.
+5. [ ] Compile policy into nftables, Unbound and Suricata configurations using original code. Stage all outputs, validate them, apply with a documented transaction/reconciliation protocol and undo if local health checks fail.
+6. [ ] Test crashes between component switches; do not claim multi-service atomicity merely because each individual configuration file was renamed atomically.
+7. [ ] Batch/compress telemetry with bounded encrypted local buffering for 72 hours. Define ordering, deduplication, acknowledgements, backpressure and priority/expiry when storage fills.
+8. [ ] Measure bytes uploaded per device per day on the shared SME traffic mix and report event-loss/resource costs. Protect tenant isolation and redact secrets/sensitive identifiers appropriately.
+9. [ ] Implement destination blocking, device quarantine to an isolation VLAN and flow throttling with explicit reverse operations. Each action carries identity, evidence, approver, creation time, expiry and an audit trail.
+10. [ ] Enforce protected-device exclusions, action-rate circuit breakers and fail-safe offline policy. Expiring temporary responses must not depend on a reachable cloud to be undone; define safe handling when wall-clock time is uncertain.
+11. [ ] Separate application policy rollback from OS slot rollback. Exercise signed-policy replay/substitution, malformed configuration, service failure and data migration across a failed RAUC update.
+12. [ ] Prototype time-limited, explicitly approved, audited remote support as off by default. A laboratory broker is sufficient for R&D; do not build the production support/cloud console or introduce a permanent SSH backdoor.
+13. [ ] Demonstrate enrollment -> policy apply -> telemetry -> quarantine -> undo on QEMU. Repeat the PDF's end-to-end VP2440 demonstration when the actual reference unit is available.
+14. [ ] Publish the protocol specification, message/version rules, response-action catalog and failure/security tests. Keep test CA/service credentials out of production trust and release artifacts.
+
+**Exit gate G18:** arcd performs the required prototype lifecycle with signed configuration, bounded offline operation and reversible guarded responses. Hardware TPM identity and VP2440 demonstration stay pending until physically tested.
+
+### Phase 19 — Cross-workstream benchmarks and full R&D exit review
+
+**Owner:** program lead + independent technical/legal reviewers; owners A–H.
+
+**Depends on:** applicable gates G0–G18 and available reference/ODM units.
+
+**Output:** the PDF's reviewed buildable specifications, OS artifacts, benchmark configurations, agent design/prototype and final findings/risk report.
+
+1. [ ] Freeze a test manifest for every run: unit/revision, firmware, OS/kernel build, ruleset/feed/model version, policy, traffic input and generator/capture configuration. Version all original scenarios and acceptance criteria.
+2. [ ] Use TRex for the consented SME-style/stateful traffic mix, IMIX for datasheet comparison, iperf3 for raw throughput and tcpreplay for permitted PCAP scenarios. Keep attack overlays and malware material inside the isolated/access-controlled laboratory.
+3. [ ] Record firewall-only maximum rate at under 0.1% loss and IPS+NDR maximum rate at under 1% loss. Test the starting targets of 1 Gbps for G4 and 2–5 Gbps for G6 with equivalent enabled features; report failures rather than reducing scope unnoticed.
+4. [ ] Record added latency p50/p99, targeting under 1 ms p50. Record detection per scenario, Product's false-alert threshold, indicator propagation under five minutes and G6 pair failover with no lost established sessions.
+5. [ ] Design/test the G6 HA state-synchronization and failure model before claiming the failover target. A single-VM restart or stateless ping does not demonstrate preservation of established sessions.
+6. [ ] Repeat power-on-to-forwarding and update-downtime tests with the final feature set. Earlier minimal-base timing does not establish the PDF's targets after adding IPS/DNS/NDR/arcd.
+7. [ ] Re-run secure-boot, verity, encrypted-data, RAUC rollback, attestation, recovery, resource-exhaustion and power-loss tests on the integrated image. Feature work must not introduce a writable executable overlay or premature health acceptance.
+8. [ ] Verify independent rebuilds, CycloneDX SBOM, source/license obligations, signed artifacts and production key-custody readiness for the exact integrated candidate, not merely an earlier base image.
+9. [ ] Review G4/G6 hardware/firmware specifications and three-ODM handoff; source-built reference firmware; FireArc-key rejection tests; TPM verifier; reproducible verity/A-B OS; reviewed clean-room handoff; selected IPS configurations; RPZ/feed licenses; seven detections; and arcd's apply/stream/quarantine/undo prototype.
+10. [ ] Publish the final R&D report: measured results, architecture changes, unresolved dependencies, named owners and the updated build-plan risks. Obtain explicit acceptance of each incomplete item; do not check hardware/legal evidence as passed because its emulator counterpart works.
+
+**Exit gate G19:** every PDF exit item is reviewed as passed or transferred as a named, owned build-plan risk with explicit program approval. A QEMU-only B/C milestone is not the full R&D exit.
 
 ## 6. Update and rollback state machine
 
@@ -812,64 +942,66 @@ locks/                       sources, packages, builders, tool versions and hash
 firmware/
   q35/                       defconfig, FMAP, reviewed EDK II/coreboot patches
   keys/                      public certificates/fingerprints only
-image/
-  mkosi.conf
-  mkosi.conf.d/
+images/
+  root/                      mkosi recipe, immutable configuration and service units
+  rootfs/                    offline filesystem/repart policy
   kernel/                    configuration, source lock and patch set
   initrd/                    dracut modules, full-verification and failure logic
-  root/                      immutable configuration and service units
-  repart.d/                  GPT assembly policy
+containers/builder/          pinned tools image definition
 update/
   rauc/                      system configuration, manifests and reviewed hooks
   backend/                   systemd-boot adapter and activation/health logic
 recovery/                    restricted UKI, reset and break-glass workflows
-lab/
-  q35/                       reproducible VM profiles and network topology
+config/
+  qemu/                      VM profiles and network topology
   verifier/                  test enrollment and attestation policy
-scripts/                     acquisition, build, signing, launch and evidence helpers
+scripts/                     thin checkout-local entry points
+src/firearc/                 acquisition, build pipeline and component checks
 tests/                       unit, integration, corruption and power-loss campaigns
 docs/
   requirements.md
   architecture.md
   threat-model.md
-  reuse-inventory.md
   key-ceremony.md
   provisioning.md
   update-state-machine.md
   recovery.md
   hardware-handoff.md
   decisions/
-  experiments/
-artifacts/<build-id>/         immutable outputs/manifests; external store in CI
+  validation/                component acceptance results and evidence references
+build/                       ignored dependency cache, automatic build IDs and logs
+  output/                    stable aliases to successful payloads
 run/<device-or-test-id>/      disks, flash, TPM state, sockets and private test state
 ```
 
-Use a thin `justfile`, consistent with the research project. Keep complex orchestration in tested scripts; reuse Python helpers where suitable and upstream build systems for upstream components. Small security-sensitive custom services/adapters can follow the research project's Rust direction without rewriting RAUC/systemd.
+Use a thin project-owned `justfile`. Keep orchestration in tested source modules and upstream build systems for upstream components. Choose implementation languages to fit the component without rewriting RAUC/systemd.
 
 Proposed future entry points:
 
 ```text
 just doctor
 just verify-inputs
+just bootstrap
+just build
+just verify-build
+just reproduce --yes
 just firmware
-just image
 just uki
 just bundle
 just factory-image
-just lab-new <device-id>      # explicit provisioning, not ordinary boot
-just lab-start <device-id>
-just lab-stop <device-id>
+just device-new <device-id>  # future explicit provisioning, not ordinary boot
+just device-start <device-id>
+just device-stop <device-id>
 just test-boot
 just test-data
 just test-update
 just test-powercut
 just test-attestation
 just test-recovery
-just reproducibility
 just release-check
 ```
 
-Signing commands must be separate from ordinary builds, with explicit approved key references. Destructive provisioning/reset/image-writing commands require a validated target and explicit confirmation; no broad disk globbing or automatic cleanup of the old research project.
+Signing commands must be separate from ordinary builds, with explicit approved key references. Destructive provisioning/reset/image-writing commands require a validated target and explicit confirmation; no broad disk globbing or cleanup outside the selected project/device scope.
 
 ## 10. Evidence and release artifact contract
 
@@ -907,7 +1039,7 @@ Use the PDF's weeks as program alignment, not a promise that missing hardware wo
 
 | Program window | Focus | Exit evidence |
 | --- | --- | --- |
-| Week 1 | Phases 0–1; preserve/reproduce useful research, portable locks and persistent harness | G0–G1; first firmware-root risks identified. |
+| Week 1 | Phases 0–1; standalone clean builds, portable locks and persistent harness | G0–G1; first firmware-root risks identified. |
 | Weeks 1–3 | Phase 2; mkosi/kernel/verity work in Phase 3 starts from week 2 | G2–G3; controlled trust and deterministic root inputs. |
 | Weeks 3–4 | Phase 4; installed systemd-boot A/B path | G4; no direct-UKI shortcut accepted. |
 | Weeks 4–5 | Phase 5; real TPM measurements, signed policies and encrypted data | G5; escrow/transplant tests. |
@@ -918,6 +1050,10 @@ Use the PDF's weeks as program alignment, not a promise that missing hardware wo
 | Weeks 9–10 | Phase 12 integrated fault/performance qualification | G12; reviewed QEMU release candidate. |
 | Weeks 11–12 | R&D integration/exit review and hardware requalification if units arrived | Owned risks, updated findings, no false closure of other workstreams. |
 | On hardware arrival | Phase 13 | G13; actual physical qualification. |
+| After G12, subject to clean-room/legal gates | Phases 14–18; Firewalla study and independent FireArc feature/agent work | G14–G18; reference-unit observations and hardware benchmarks may remain blocked. |
+| After applicable A–H deliverables | Phase 19 | G19; full R&D review, not merely the secure-platform milestone. |
+
+**Schedule reconciliation:** the PDF schedules D–H in parallel from weeks 1–4 onward. The user's requested boot-chain-first sequence delays their integration and may delay their study work. Do not promise that all follow-on Phases 14–19 fit into the unchanged 12-week program. At G12, rebaseline the delivery date from actual staffing, legal approval, hardware availability and the reviewed parity scope. Independent study could start earlier only with explicit owner approval and clean-room separation; feature integration remains gated on the secure base.
 
 Critical dependency chain:
 
@@ -943,7 +1079,7 @@ Do not defer the shared-ESP, pre-Linux rollback, TPM-policy-update or data-migra
 | vboot/EDK II/SMMSTORE combination and firmware-region capacity | Firmware | Feasibility test with pinned sources; record blocked firmware-verification claims, not a fake Secure Boot substitution. |
 | Legacy dependencies/SDK are pinned but may be stale or incompletely authenticated | Build/security | Provenance/CVE review and deliberate refresh; pinning is not security approval. |
 | Old project has ignored artifacts, local modifications and absolute/tool-hash dependencies | Platform | Inventory and portable reconstruction; do not overwrite or bypass its guards. |
-| systemd 262 research stub versus systemd 257 root components | Platform | Align or explicitly qualify versions and PCR/cryptsetup compatibility. |
+| systemd boot/stub/userspace/PCR component compatibility | Platform | Use aligned pinned tools and qualify the actual boot/cryptsetup behavior. |
 | No native systemd-boot slot semantics in selected RAUC EFI backend | Update engineer | Custom backend + two-stage activation + exhaustive integration tests. |
 | Shared FAT ESP can be a common failure point | Platform/test | Power-loss gate; redesign if a candidate write can destroy the known-good path. |
 | Default-entry semantics or automatic blessing defeats retry limit | Update engineer | Pinned-version boot-selection tests and one controlled health/blessing path. |
@@ -956,14 +1092,24 @@ Do not defer the shared-ESP, pre-Linux rollback, TPM-policy-update or data-migra
 | Full-root preverification threatens boot/downtime targets | Platform/performance | Measure/optimize; do not silently reduce integrity coverage. |
 | HSM/discrete TPM/physical flash programmer not yet available | Release/hardware | Lab simulation labeled; no production custody or physical-recovery completion claim. |
 | Unavailable business design and physical reference samples | Program lead | Obtain inputs; maintain explicit dependencies and update requirements through review. |
+| “Deploy Firewalla” could conflict with the PDF's independent-development requirement | Product/legal | Resolve the checkpoint below before any Firewalla installation/source transfer; default to reviewed study plus original FireArc implementation. |
+| Boot-chain-first sequencing differs from the PDF's overlapping D–H schedule | Program lead | Rebaseline follow-on effort/dates; do not imply the original 12-week exit remains achievable unchanged. |
 
-No further user choice blocks writing this plan. Implementation must still review the exact new tool/package lock, firmware-verification model, final layout sizing and production custody/retention procedures at their gates.
+No further user choice blocks documenting the secure-platform plan. Implementation must still review the exact new tool/package lock, firmware-verification model, final layout sizing and production custody/retention procedures at their gates.
+
+### Outstanding owner queries — do not silently choose a conflicting architecture
+
+1. **What does “deploy Firewalla” mean?** Confirm either (a) separate Firewalla reference study followed by independent FireArc feature implementation, which follows the PDF, or (b) an explicitly scoped, isolated non-shipping Debian compatibility study. Actual Firewalla embedding in the FireArc product is a third path that conflicts with the current PDF and is blocked pending written architecture/legal approval. The earlier clarification was interrupted; no answer is assumed here.
+2. **Can the referenced Technology & Business Design document be supplied?** It is needed to verify external architecture/product constraints that this PDF references but does not reproduce. Its absence need not stop independent QEMU foundation work.
+3. **Who owns the follow-on reviews and revised schedule?** Confirm named legal/clean-room reviewers, study/build separation, staffing and available reference units before committing to the D–H dates. The plan assigns roles, not invented personnel.
+
+Already recorded mkosi, data-only encryption, per-device escrow and temporary Git-signing decisions remain intact; these queries do not reopen those decisions.
 
 ## 13. Definition of done
 
 ### QEMU milestone
 
-- [ ] Standalone locked build and persistent Q35/swtpm environment; useful EXP-029 behavior accounted for.
+- [ ] Standalone clean-clone locked builds and persistent Q35/swtpm environment.
 - [ ] Source-built coreboot + UEFI; firmware trust boundary explicitly documented and independently tested where claimed.
 - [ ] FireArc-owned Secure Boot trust; signed systemd-boot in the real path; unauthorized boot managers and UKIs refused.
 - [ ] mkosi-built Debian with authenticated full-root preverification, read-only dm-verity, lockdown and documented kernel/modules.
@@ -986,15 +1132,23 @@ No further user choice blocks writing this plan. Implementation must still revie
 - [ ] Production offline-root/HSM/two-person release and per-device escrow operations are operationally reviewed.
 - [ ] G4/G6 firmware/ODM requirements and remaining risks are reviewed in the full R&D exit process.
 
+### Subsequent full R&D milestone — outside the current B/C implementation slice
+
+- [ ] Firewalla scope/legal decision and reviewed parity/behavior specifications with clean-room evidence.
+- [ ] Original data-plane/IPS configurations selected per model using comparable measurements and tested failure behavior.
+- [ ] RPZ order/delivery, bypass handling and NDR event output tested; commercial feed rights reviewed.
+- [ ] Seven initial NDR detections evaluated with scenario-level results, resource costs and consented baseline false-alert evidence.
+- [ ] arcd prototype enrolls, applies signed policy, streams buffered telemetry and executes/undoes guarded quarantine.
+- [ ] Integrated physical benchmarks, G6 failover and final-feature boot/update timing recorded against the PDF targets.
+- [ ] All A–H outputs reviewed; missing evidence transferred transparently as approved named risks rather than silently marked complete.
+
 ## 14. Reference registry
 
-The PDF and local research are the requirements/compatibility sources. Online documents explain component contracts; pin their applicable versions during implementation because `latest`, `main` and `master` can change.
+The PDF defines requirements; upstream documentation defines component contracts. Pin applicable versions during implementation because `latest`, `main` and `master` can change.
 
 ### Local primary sources
 
 - `FireArc_R-D_Plan—Technical_Team.pdf`, especially pp. 5–7 and 13.
-- `/home/rifat/projects/project_firearc/docs/boot-chain-file-map.md`.
-- `/home/rifat/projects/project_firearc/docs/experiments/EXP-029-authenticated-debian-root.md`.
 - Exact dependency/configuration/evidence paths listed in Section 3.1.
 
 ### Upstream component contracts
@@ -1003,7 +1157,7 @@ The PDF and local research are the requirements/compatibility sources. Online do
 - [coreboot EDK II payload configuration](https://github.com/coreboot/coreboot/blob/main/payloads/external/edk2/Kconfig); use the locked Dasharo tree for actual option compatibility.
 - [coreboot vboot design](https://github.com/coreboot/coreboot/blob/main/Documentation/security/vboot/index.md).
 - [coreboot measured boot](https://github.com/coreboot/coreboot/blob/main/Documentation/security/vboot/measured_boot.md).
-- [coreboot SMMSTORE](https://github.com/coreboot/coreboot/blob/main/Documentation/drivers/smmstore.md); inherited pins use the older SMMSTORE v2 option naming.
+- [coreboot SMMSTORE](https://github.com/coreboot/coreboot/blob/main/Documentation/drivers/smmstore.md); qualify the naming/layout at the pinned commit.
 - [EDK II UEFI payload](https://github.com/tianocore/edk2/blob/master/UefiPayloadPkg/Readme.md); do not substitute it blindly for the successful Dasharo payload.
 - [QEMU TPM device and swtpm integration](https://www.qemu.org/docs/master/specs/tpm.html).
 - [mkosi manual source](https://github.com/systemd/mkosi/blob/main/mkosi/resources/man/mkosi.1.md).
@@ -1016,4 +1170,4 @@ The PDF and local research are the requirements/compatibility sources. Online do
 - [RAUC handlers, hooks and installation/marking APIs](https://rauc.readthedocs.io/en/latest/using.html).
 - [RAUC signing, verity bundles and data migration](https://rauc.readthedocs.io/en/latest/advanced.html).
 
-**Current implementation action:** Phase 0 documentation/input verification and Phase 1 persistent research harness are underway; see [progress](docs/progress.md). The portable mkosi builder and final installed-device profile remain ahead. Do not regenerate old keys, replace reference sources or launch a destructive installer to bypass an unmet gate.
+**Current implementation action:** standalone clean reconstruction and root/initramfs integrity work are underway; see [progress](docs/progress.md). Firmware, signed boot and the installed-device lifecycle remain unqualified. Do not generate signing keys or launch a destructive installer to bypass an unmet gate.

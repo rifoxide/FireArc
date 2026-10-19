@@ -1,5 +1,25 @@
 # Generated builds and per-device state (including software TPM secrets).
 /artifacts/
+/build/
+/.firearc.lock
+# Downloaded archives/packages and generated binaries never belong in Git.
+*.deb
+*.rpm
+*.raw
+*.qcow2
+*.img
+*.ext4
+*.verity
+*.efi
+*.rom
+*.iso
+*.cpio
+*.bin
+*.tar
+*.tar.*
+*.xz
+*.gz
+*.zip
 /run/
 /.cache/
 /.venv/

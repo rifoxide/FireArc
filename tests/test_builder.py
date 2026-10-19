@@ -10,10 +10,10 @@ import unittest
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "scripts"))
-from firearc_lib import builder
-from firearc_lib.integrity import SafetyError, relative_name, sha256, write_json
-from test_foundation import temporary
+sys.path.insert(0, str(ROOT / "src"))
+from firearc import builder
+from firearc.integrity import SafetyError, relative_name, sha256, write_json
+from support import temporary
 
 
 class BuilderTests(unittest.TestCase):
@@ -24,6 +24,43 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("systemd-ukify=257.13-1~deb13u1", value["tools"])
         self.assertIn("systemd-boot-efi=257.13-1~deb13u1", value["tools"])
         self.assertIn("@sha256:", value["base_image"])
+        self.assertTrue(all("=" in package for package in value["tools"]))
+        self.assertEqual(value["package_count"], 231)
+
+    def test_complete_dependency_closure_is_order_independent_and_detects_drift(self):
+        first = {"repository": "debian", "filename": "pool/a.deb", "version": "1", "sha256": "a" * 64}
+        second = {"repository": "debian-security", "filename": "pool/b.deb", "version": "2", "sha256": "b" * 64}
+        self.assertEqual(builder.closure_digest([first, second]), builder.closure_digest([second, first]))
+        self.assertNotEqual(builder.closure_digest([first, second]), builder.closure_digest([first, {**second, "version": "3"}]))
+
+    def test_appliance_root_uses_exact_versions_and_matching_kernel(self):
+        value = builder.root_lock(ROOT)
+        self.assertEqual(value["profile"], "root")
+        self.assertIn(value["kernel_package"] + "=" + value["kernel_version"], value["packages"])
+        self.assertTrue(all("=" in package for package in value["packages"]))
+        self.assertIn("dracut=106-6", value["packages"])
+        self.assertIn("systemd-boot-efi=257.13-1~deb13u1", value["packages"])
+
+    def test_appliance_lock_refuses_unpinned_or_mismatched_kernel(self):
+        original = builder.root_lock(ROOT)
+        for value in [{**original, "packages": [*original["packages"], "unversioned"]},
+                      {**original, "kernel_version": "wrong"}, {**original, "kernel_release": "../../bad"}]:
+            with self.subTest(value=value), patch.object(builder, "load_lock", return_value=value), self.assertRaises(SafetyError):
+                builder.root_lock(ROOT)
+
+    def test_appliance_recipe_is_explicit_preassembly_not_unsigned_boot(self):
+        recipe = (ROOT / "images/root/mkosi.conf").read_text()
+        self.assertIn("Bootable=no", recipe)
+        self.assertIn("Autologin=no", recipe)
+        self.assertIn("RootPassword=hashed:!", recipe)
+        dracut = (ROOT / "images/root/skeleton/etc/dracut.conf.d/10-firearc-root.conf").read_text()
+        self.assertIn('hostonly="no"', dracut)
+        self.assertIn("rd.shell=0", dracut)
+        self.assertIn("rd.emergency=poweroff", dracut)
+
+    def test_unknown_package_profile_is_refused_before_acquisition(self):
+        with self.assertRaises(SafetyError):
+            builder.plan_packages(ROOT, "not-created", profile="unknown")
 
     def test_deb822_wrapped_fields_do_not_become_new_records(self):
         data = "Package: one\nVersion: 1\nDescription: short\n long: wrapped\n\nPackage: two\nVersion: 2\n"
@@ -113,7 +150,7 @@ class BuilderTests(unittest.TestCase):
 
     def test_network_acquisition_requires_explicit_flag(self):
         with self.assertRaises(SafetyError):
-            builder.fetch_tools(ROOT, "never-created", allow_network=False)
+            builder.fetch_packages(ROOT, "never-created", allow_network=False)
 
     def test_download_checks_sha256_size_and_retains_failed_partial(self):
         payload = b"synthetic binary package"
@@ -164,47 +201,6 @@ class BuilderTests(unittest.TestCase):
             self.assertEqual(set(inventory), {"link"})
             self.assertEqual(inventory["link"]["target"], str(outside))
 
-    def make_export_fixture(self, root):
-        work = root / "tools-b"
-        work.mkdir(mode=0o700)
-        stage = work / ".tools-export-111111111111"
-        stage.mkdir(mode=0o700)
-        evidence = work / "export-222222222222"
-        evidence.mkdir(mode=0o700)
-        identity, cid = "sha256:" + "a" * 64, "b" * 64
-        def record(name, command):
-            write_json(evidence / (name + ".command.json"), command)
-            write_json(evidence / (name + ".exit.json"), {"returncode": 0})
-        record("create", ["docker", "create", "--network=none", "--read-only", "--cap-drop=ALL",
-                          "--security-opt=no-new-privileges", identity, "/bin/true"])
-        (evidence / "create.stdout").write_text(cid + "\n")
-        for name, relative in [("usr", "usr"), ("alternatives", "etc/alternatives"), ("ca-certs", "etc/ssl/certs")]:
-            (stage / relative).mkdir(parents=True, exist_ok=True)
-            record("copy-" + name, ["docker", "cp", cid + ":/" + relative + "/.", str(stage / relative)])
-        for name in ("bin", "sbin", "lib", "lib64"):
-            (stage / name).symlink_to("usr/" + name)
-        record("remove-owned-container", ["docker", "rm", cid])
-        return work, stage, evidence, identity
-
-    def test_resume_export_uses_only_completed_recorded_copy_without_docker(self):
-        with temporary() as root:
-            work, stage, evidence, identity = self.make_export_fixture(root)
-            with patch.object(builder, "logged") as command:
-                self.assertEqual(builder.resume_export_stage(work, evidence.name, identity), (stage, evidence))
-            command.assert_not_called()
-
-    def test_resume_export_refuses_incomplete_or_wrong_destination(self):
-        with temporary() as root:
-            work, stage, evidence, identity = self.make_export_fixture(root)
-            path = evidence / "copy-usr.command.json"
-            data = json.loads(path.read_text())
-            data[-1] = "/tmp/unrelated/usr"
-            path.write_text(json.dumps(data))
-            with self.assertRaises(SafetyError):
-                builder.resume_export_stage(work, evidence.name, identity)
-            with self.assertRaises(SafetyError):
-                builder.resume_export_stage(work, "../../unrelated", identity)
-
     def smoke_tar(self, path, changes=None):
         files = {"etc/shadow": "root:!:1::::::\n", "etc/machine-id": "uninitialized\n",
                  "var/lib/dpkg/status": "Package: systemd\nVersion: 257.13-1~deb13u1\nStatus: install ok installed\n"}
@@ -220,7 +216,7 @@ class BuilderTests(unittest.TestCase):
         with temporary() as root:
             path = root / "smoke.tar"
             self.smoke_tar(path)
-            report = builder.inspect_smoke_tar(path)
+            report = builder.inspect_root_basics(path)
             self.assertTrue(report["root_locked"])
             self.assertTrue(report["machine_identity_unprovisioned"])
             self.assertEqual(report["systemd_version"], "257.13-1~deb13u1")
@@ -236,7 +232,51 @@ class BuilderTests(unittest.TestCase):
                 path = root / "smoke.tar"
                 self.smoke_tar(path, change)
                 with self.assertRaises(SafetyError):
-                    builder.inspect_smoke_tar(path)
+                    builder.inspect_root_basics(path)
+
+    def appliance_tar(self, path, changes=None):
+        lock = builder.root_lock(ROOT)
+        release = lock["kernel_release"]
+        files = {"etc/shadow": b"root:!:1::::::\n", "etc/machine-id": b"uninitialized\n",
+                 "var/lib/dpkg/status": "\n\n".join(
+                     f"Package: {p.split('=', 1)[0]}\nVersion: {p.split('=', 1)[1]}\nStatus: install ok installed"
+                     for p in lock["packages"]).encode(),
+                 "boot/config-" + release: "\n".join(f"{option}=y" for option in [
+                     "CONFIG_EFI", "CONFIG_EFI_STUB", "CONFIG_BLK_DEV_DM", "CONFIG_DM_VERITY",
+                     "CONFIG_DM_CRYPT", "CONFIG_TCG_TPM", "CONFIG_EXT4_FS", "CONFIG_SQUASHFS"]).encode(),
+                 "boot/vmlinuz-" + release: b"MZsynthetic-kernel",
+                 "boot/initrd.img-" + release: b"\x1f\x8bsynthetic-header-only",
+                 "usr/lib/systemd/boot/efi/linuxx64.efi.stub": b"MZsynthetic-stub",
+                 "usr/lib/systemd/boot/efi/systemd-bootx64.efi": b"MZsynthetic-boot"}
+        files.update(changes or {})
+        with tarfile.open(path, "w:") as archive:
+            for name, payload in files.items():
+                if payload is None:
+                    continue
+                member = tarfile.TarInfo("./" + name)
+                member.size = len(payload)
+                archive.addfile(member, io.BytesIO(payload))
+        return lock
+
+    def test_appliance_artifact_checks_do_not_claim_boot_qualification(self):
+        with temporary() as root:
+            path = root / "root.tar"
+            lock = self.appliance_tar(path)
+            report = builder.inspect_root_tar(path, lock)
+            self.assertFalse(report["boot_chain_qualified"])
+            self.assertEqual(report["requested_packages_verified"], len(lock["packages"]))
+            self.assertEqual(len(report["efi_sha256"]), 2)
+
+    def test_appliance_missing_kernel_feature_and_initrd_are_refused(self):
+        release = builder.root_lock(ROOT)["kernel_release"]
+        for changes in [{"boot/config-" + release: b"CONFIG_EFI=y\n"},
+                        {"boot/initrd.img-" + release: None},
+                        {"usr/lib/systemd/boot/efi/linuxx64.efi.stub": b"wrong header"}]:
+            with self.subTest(changes=changes), temporary() as root:
+                path = root / "root.tar"
+                lock = self.appliance_tar(path, changes)
+                with self.assertRaises(SafetyError):
+                    builder.inspect_root_tar(path, lock)
 
 
 if __name__ == "__main__":

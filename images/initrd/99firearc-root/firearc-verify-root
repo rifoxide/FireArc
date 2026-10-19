@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export LC_ALL=C
+. /usr/lib/firearc/authority.sh
+
+# Failure exits the required oneshot unit; no recovery shell or raw-root retry.
+fa_load_authority /etc/firearc/verity.authority
+fa_check_cmdline /proc/cmdline
+udevadm settle --timeout=15
+fa_select_devices
+fa_check_boot_esp
+fa_verify_and_open

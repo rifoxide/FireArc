@@ -1,83 +1,72 @@
 # FireArc
 
-QEMU-first development of FireArc's verified boot chain and atomic OS updates.
-The authoritative scope and implementation gates are in [PLAN.md](PLAN.md).
+Verified boot and atomic OS updates for an x86-64 appliance. The implementation
+contract is [PLAN.md](PLAN.md); current status is [progress](docs/progress.md).
 
-## Current milestone
+## Build from a checkout
 
-Phase 0 / Phase 1 foundation: requirement traceability, locked research inputs,
-offline safety tests, an independent headless EXP-029 regression harness, and a
-signed-snapshot, offline/rootless mkosi builder smoke test.
-
-**This is not yet the final appliance.** The reusable research fixture boots a
-signed UKI directly and powers off after verifying its Debian root. It does not
-implement systemd-boot, bootable appliance mkosi builds, encrypted data, RAUC
-updates or attestation. The separate mkosi smoke output is nonbootable/unsigned.
-See [progress](docs/progress.md) for actual results and remaining gates.
-
-## Safe local checks
-
-Requires Linux, Python 3.11+ and Git; `just` is an optional command wrapper.
-The tests use only the Python standard library and synthetic disposable inputs.
+Prerequisites: Linux amd64, Python 3.11+, Git, `gpgv`, Docker with a running daemon,
+and working unprivileged user/mount/network namespaces with subordinate UID/GID
+mappings. `just` is the command runner. No host packages are installed by builds.
 
 ```sh
+git clone git@github.com:rifoxide/FireArc.git
+cd FireArc
 just doctor
 just check
-# Without just:
-python3 -B scripts/firearc.py --help
-python3 -B -m unittest discover -s tests -v
+just bootstrap       # network: download exact pinned dependencies
+just build           # offline: builder, kernel/root/initramfs, ext4 and verity
+just verify-build    # static initrd/unit checks and filesystem corruption tests
 ```
 
-These commands do not install packages, generate keys, launch VMs or access the
-old project's private credentials. `doctor` reports missing future build tools;
-the local QEMU binary pins are compatibility checks, not a portable build lock.
+Generated binaries have stable paths under **`build/output/`**:
+`kernel.efi`, `initrd.img`, `root.tar`, `root.ext4`, `root.verity`, and
+`verity-authority.json`. Dependencies and successful builds are selected
+automatically; commands never require manual attempt labels.
 
-## Reproduce the research boot
+Git contains source, configuration and exact version/URL/hash locks—not package
+caches, downloaded sources, compiled images, private keys or device state.
+`locks/debian-build.json` pins authenticated Debian metadata and the entire tools
+dependency closure; `locks/root.json` pins the root closure. Firmware repository
+URLs/commits and SDK digest are in `locks/firmware-sources.json`.
 
-The approved local research checkout supplies **public artifacts**, not keys:
+## Clean reconstruction and reproducibility
 
 ```sh
-just research-verify /home/rifat/projects/project_firearc
-just baseline-import /home/rifat/projects/project_firearc
-just baseline-new baseline-a
-just baseline-run baseline-a --label good-a
-just baseline-run baseline-a --label good-b
+just clean --yes         # remove only this checkout's generated build/ tree
+just bootstrap
+just build
+just verify-build
+just reproduce --yes     # two empty-cache download/build/check rounds + hash comparison
 ```
 
-Import first verifies all files in five pinned historical manifests and checks
-the nine source checkouts. It copies only 13 allowlisted public runtime/metadata
-files into ignored `artifacts/research/exp-029/`. No old script is executed, and
-the reference project is never a writable QEMU disk or firmware backing file.
-Subsequent boots use only the imported files in this repository.
+`build/reproducibility.json` records the two-round result. Docker's shared,
+content-addressed image/layer store is not globally pruned; package caches and
+project outputs are redownloaded/rebuilt, and tools builds disable layer reuse.
+See [build instructions](docs/builder.md) for trust and environment boundaries.
 
-Each explicit `baseline-new` creates its own flash and root/hash overlays.
-`baseline-run` **requires an existing device** and preserves its flash/disks.
-Existing imports, device names and evidence labels cannot be overwritten.
+**The current outputs are unsigned build inputs, not a deployable appliance.**
+Firmware builds, signed systemd-boot/UKIs, installed A/B layout, TPM-bound LUKS2,
+RAUC activation/rollback, recovery and hardware acceptance remain pending.
 
-Optional software-TPM attachment and corruption controls are documented in
-[the laboratory runbook](docs/lab.md). Automated serial evidence contains only
-this locked-root research self-test, not a support login or recovery session.
+## Layout
 
-## Security and implementation rules
+| Path | Purpose |
+| --- | --- |
+| `src/firearc/` | Dependency acquisition, build pipeline and validation code |
+| `images/` | Root image, initramfs module and filesystem recipes |
+| `containers/builder/` | Digest-pinned Debian tools environment |
+| `locks/` | Specification, upstream versions, metadata and dependency pins |
+| `tests/` | Offline safety, pipeline and component tests |
+| `docs/` | Requirements, decisions, design and component validation |
+| `build/` | Ignored downloads, logs, state and generated binaries |
 
-- No production or research private signing keys in Git, builds or imports.
-- `run/` includes private per-VM TPM state; never publish or commit it.
-- No host block-device writes, host TPM passthrough, host mounts or external VM
-  networking are used by this milestone.
-- No silent resets, re-enrollment or formatting after a failed boot.
-- Do not bypass a hash mismatch to make a demonstration succeed.
-- Production trust, firmware-root protection and physical hardware results are
-  separate gates, not implied by QEMU success.
-- `just secrets` screens known credential patterns; it cannot prove that every
-  possible secret is absent. Review every publication.
-- Git commit signing is temporarily deferred by the owner (ADR 0004). Boot/update
-  signing and production key custody remain required. This milestone does not
-  generate a Git signing key or change global Git settings.
+Useful commands: `just status`, `just build-tools`, `just build-root`,
+`just build-rootfs`, `just check-initrd`, `just check-rootfs`.
 
-## Documents
+## Documentation
 
-- [Requirements](docs/requirements.md) and [threat model](docs/threat-model.md)
-- [Research reuse inventory](docs/reuse-inventory.md)
-- [Decisions](docs/decisions/README.md) and [risk register](docs/risks.md)
-- [Laboratory runbook](docs/lab.md) and [progress](docs/progress.md)
-- [Development builder](docs/builder.md) and [builder results](docs/experiments/EXP-002-builder-smoke.md)
+- [Development](docs/development.md), [build system](docs/builder.md)
+- [Requirements](docs/requirements.md), [threat model](docs/threat-model.md)
+- [Root image](docs/appliance-root.md), [verity](docs/root-filesystem.md), [initramfs](docs/initramfs.md)
+- [Decisions](docs/decisions/README.md), [risks](docs/risks.md), [validation](docs/validation/README.md)

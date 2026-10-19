@@ -7,7 +7,9 @@
   "base_config_sha256": "567e3c17b188e21cd42aa5e1c55e16d8270f880ed8ea321dbd40f993467efc4c",
   "base_image_created": "2026-10-05T00:00:00Z",
   "base_publisher_signature_verified": false,
-  "metadata_reference": "artifacts/exp-029/plan-tools-b",
+  "snapshot_url": "https://snapshot.debian.org/archive",
+  "closure_sha256": "e2a7b1b81b1133e13ccda3b4cac84ee5c69dd8a64236946b0cfaeb356e2a6ee1",
+  "package_count": 231,
   "keyring_sha256": "506b815cbb32d9b6066b4a2aa524071e071761e7e7f68c3ac74f3061ba852017",
   "repositories": {
     "debian": {
@@ -33,11 +35,11 @@
     "dracut-config-generic=106-6",
     "rauc=1.13-3+deb13u1",
     "tpm2-tools=5.7-1",
-    "apt", "apt-utils", "ca-certificates", "cryptsetup-bin", "e2fsprogs",
-    "dosfstools", "mtools", "squashfs-tools", "fdisk", "kmod", "binutils",
-    "openssl", "sbsigntool", "python3", "tar", "xz-utils", "zstd", "gzip",
-    "gpgv", "debian-archive-keyring"
+    "apt=3.0.3", "apt-utils=3.0.3", "ca-certificates=20250419", "cryptsetup-bin=2:2.7.5-2", "e2fsprogs=1.47.2-3+b12",
+    "dosfstools=4.2-1.2", "mtools=4.0.48-1", "squashfs-tools=1:4.6.1-1", "fdisk=2.41.5-0+deb13u1", "kmod=34.2-2", "binutils=2.44-3",
+    "openssl=3.5.7-1~deb13u3", "sbsigntool=0.9.4-3.2+deb13u1", "python3=3.13.5-1", "tar=1.35+dfsg-3.1", "xz-utils=5.8.1-1+deb13u2", "zstd=1.5.7+dfsg-1", "gzip=1.13-1+deb13u1",
+    "gpgv=2.4.7-21+deb13u1+b5", "debian-archive-keyring=2025.1"
   ],
   "historical_valid_until_exception": "Only this fixed snapshot; InRelease signatures, index hashes and package SHA-256 remain mandatory",
-  "scope": "Initial development tools and unsigned root-build smoke test; not security/CVE approval or a production release"
+  "scope": "Pinned project build dependencies; not security/CVE approval or a production release"
 }

@@ -21,4 +21,4 @@ complete revocation/erase guarantee. Recovery diagnostics, destructive factory
 reset and sensitive-data unlock require separate authorization.
 
 References: C-06/C-08; `PLAN.md` Phases 5 and 9. No recovery secrets are generated
-by the initial research runner.
+by static build checks or an unprovisioned image.
