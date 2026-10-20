@@ -39,6 +39,10 @@ sbom *options:
 firmware-sources *options:
     python3 -B scripts/firearc.py firmware-sources "$@"
 
+# Compile the pinned sources into the QEMU Q35 ROM offline in the pinned SDK.
+firmware-build *options:
+    python3 -B scripts/firearc.py firmware-build "$@"
+
 # Assemble the unsigned development installed-device disk (ESP + slot A).
 device *options:
     python3 -B scripts/firearc.py device "$@"

@@ -168,7 +168,7 @@ The build lock covers mkosi, RAUC, systemd tools, dracut, TPM libraries/tools, c
 
 | Boundary | Enforcement | What it does not establish |
 | --- | --- | --- |
-| Initial firmware | Trusted host/approved QEMU firmware fixture initially; separately qualify a protected-RO/vboot model if mutable firmware verification is claimed | Real Intel Boot Guard, real flash protection or protection from a malicious hypervisor. |
+| Initial firmware | Self-built coreboot/EDK II ROM from the pinned closure (initially the approved QEMU OVMF fixture); host-rooted in QEMU, so separately qualify a protected-RO/vboot model if mutable firmware verification is claimed | Real Intel Boot Guard, real flash protection or protection from a malicious hypervisor. |
 | coreboot to UEFI | Payload inside approved firmware; verified mutable firmware regions where implemented | Signing an OS UKI does not authenticate coreboot itself. |
 | UEFI to boot manager | FireArc db/dbx verifies signed systemd-boot | A firmware setup password alone is not a root of trust. |
 | Boot manager to UKI | UEFI image verification remains enforced on chainloaded UKIs | A signed boot manager must not be treated as authorization for arbitrary unsigned children. |
@@ -356,7 +356,7 @@ Check only steps supported by project code and recorded validation. A checked do
 9. [ ] Qualify the project firmware/OS boot path and signature/root corruption controls using binaries built from this checkout.
 10. [ ] Create a separate **installed-device profile** with persistent OS disk, writable firmware variable store, swtpm state and any required CMOS state across normal reboots.
 11. [ ] Attach one isolated swtpm TPM 2.0 instance per provisioned device. Qualify TIS/CRB and ACPI ownership; do not assume interchangeability or permit duplicate TPM resources.
-12. [ ] Use persistent flash configured for the actual coreboot/Dasharo layout. Do not assume OVMF's CODE/VARS split applies to this monolithic firmware image.
+12. [ ] Use persistent flash configured for the actual coreboot/Dasharo layout. Do not assume OVMF's CODE/VARS split applies to this monolithic firmware image. Addressed for the harness: `check-boot` boots a per-run writable copy of the monolithic ROM whose SMMSTORE FMAP region carries the variable store; persistent-across-reboot flash state and reboot-loop coverage remain open.
 13. [ ] Add headless serial evidence and a local-only QMP control socket for automated runs; keep interactive support sessions uncaptured when they could contain recovery secrets.
 14. [ ] Provide explicit new-device, stop, reboot, power-cut and isolated-snapshot operations. Ordinary boot must never silently reset TPM/NVRAM or re-enroll keys after failure.
 15. [ ] Start without external VM networking. Later add isolated WAN/LAN virtual networks, an update server and a verifier; never attach test traffic to the office network by default.
@@ -370,7 +370,7 @@ Check only steps supported by project code and recorded validation. A checked do
 **Depends on:** G1.  
 **Output:** self-built enforcement-on firmware, documented firmware-root model and key procedures.
 
-1. [ ] Build coreboot and the Dasharo EDK II payload from pinned upstream commits and reviewed project configuration in a fresh offline workspace.
+1. [x] Build coreboot and the Dasharo EDK II payload from pinned upstream commits and reviewed project configuration in a fresh offline workspace. Implemented by `just firmware-build`: the fully closed pinned sources compile inside the pinned SDK container with networking disabled (pre-seeded payload workspace, gitlink census enforced), producing the 8 MiB QEMU Q35 ROM with a manifest of input commits, toolchain digests and the CBFS inventory; `just check-boot` boots it through the integrity gate. This is not a security review, not firmware-verified boot and not byte-reproducibility qualification.
 2. [ ] Archive expanded Kconfig, payload DSC/FDF, patches, CBFS/FMAP map, compiler hashes, build commands and complete dependency manifest.
 3. [ ] Inspect firmware layout and identify code, SMMSTORE, boot-selection state and preserved regions. Verify writes land only where intended in the baseline tests.
 4. [ ] Separate the initial trusted-firmware laboratory profile from any firmware-verification profile. A detached signature checked by the launcher authenticates cold-start input; it is not guest-enforced verification on every reset.

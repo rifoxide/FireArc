@@ -1,18 +1,20 @@
 """Development installed-device profile and QEMU Q35 boot verification.
 
 Assembles an unsigned development disk (GPT ESP + FIREARC_ROOT_A/FIREARC_HASH_A)
-from the frozen OS payloads, boots it under the pinned host QEMU/OVMF tools and
-asserts the initrd integrity gate outcome on the serial console, including a
-corrupted-root negative control. This is a development harness profile: it is
-not Secure Boot, not the production provisioning layout and not a signing or
-physical-device qualification.
+from the frozen OS payloads, boots it under the pinned host QEMU with the
+self-built coreboot/EDK II firmware and asserts the initrd integrity gate
+outcome on the serial console, including a corrupted-root negative control.
+The firmware image is the monolithic 8 MiB ROM from the firmware-build stage;
+its SMMSTORE region carries the writable UEFI variable store, so each run
+boots a private writable copy of the ROM. This is a development harness
+profile: it is not Secure Boot, not the production provisioning layout and
+not a signing or physical-device qualification.
 """
 
 import os
 from pathlib import Path
 import re
 import shutil
-import stat
 
 from . import builder, rootfs
 from .inputs import load_lock
@@ -24,6 +26,7 @@ from .integrity import (
 SECTOR = 512
 MIB = 1024 * 1024
 ESP_MIB = 512
+FIRMWARE_BYTES = 8 * MIB
 DISK_MIB = 1 + ESP_MIB + rootfs.ROOT_BYTES // MIB + rootfs.HASH_BYTES // MIB + 1
 ROOT_OFFSET = (1 + ESP_MIB) * MIB
 HASH_OFFSET = ROOT_OFFSET + rootfs.ROOT_BYTES
@@ -129,13 +132,18 @@ def sfdisk_script():
     return "\n".join(lines) + "\n"
 
 
-def qemu_command(code, variables, disk, serial, *, kvm):
+def qemu_command(firmware, disk, serial, *, kvm):
+    # The payload has no virtio drivers: the development disk is presented
+    # over the emulated ICH9 AHCI controller the payload does support.
     return ["qemu-system-x86_64", "-machine", "q35", "-accel", "kvm" if kvm else "tcg",
             "-cpu", "max", "-m", "2048", "-nodefaults", "-display", "none", "-no-reboot",
             "-net", "none", "-serial", f"file:{serial}",
-            "-drive", f"if=pflash,format=raw,readonly=on,file={code}",
-            "-drive", f"if=pflash,format=raw,file={variables}",
-            "-drive", f"file={disk},format=raw,if=virtio"]
+            # Monolithic firmware: the writable pflash copy carries both code
+            # and the SMMSTORE variable region (no OVMF-style CODE/VARS split).
+            "-drive", f"if=pflash,format=raw,file={firmware}",
+            "-device", "ahci,id=ahci0",
+            "-drive", f"if=none,id=disk0,file={disk},format=raw",
+            "-device", "ide-hd,drive=disk0,bus=ahci0.0"]
 
 
 def boot_verdict(serial_text):
@@ -146,26 +154,22 @@ def boot_verdict(serial_text):
         "denial": bool(DENIAL_MARKER.search(serial_text))}
 
 
-def ovmf_pins(root):
-    pins = load_lock(root, "host-tools").get("ovmf")
-    if not isinstance(pins, dict) or set(pins) != {"code", "vars"}:
-        raise SafetyError("Expected pinned host OVMF code/vars firmware files")
-    files = {}
-    for role in ("code", "vars"):
-        item = pins[role]
-        if not isinstance(item, dict) or not Path(item.get("path", "")).is_absolute() \
-                or not re.fullmatch(r"[0-9a-f]{64}", item.get("sha256", "")):
-            raise SafetyError(f"Invalid OVMF {role} compatibility pin")
-        path = Path(item["path"])
-        if not stat.S_ISREG(path.stat().st_mode):
-            raise SafetyError(f"OVMF {role} pin is not a regular host file")
-        verify_file(path, item["sha256"])
-        files[role] = path
-    return files
+def firmware_rom(root, label):
+    """The verified self-built firmware ROM from a firmware-build stage."""
+    source, output, result = _stage_outputs(
+        root, label, "firmware-build", Path(root) / "build/firmware-build")
+    rom = regular_file(output, "coreboot.rom")
+    if result.get("artifacts", {}).get("coreboot.rom") != sha256(rom):
+        raise SafetyError("Firmware stage does not vouch for the ROM artifact")
+    manifest = read_json(regular_file(output, "manifest.json"))
+    if manifest.get("coreboot.rom", {}).get("sha256") != sha256(rom) \
+            or manifest.get("coreboot.rom", {}).get("bytes") != FIRMWARE_BYTES:
+        raise SafetyError("Firmware manifest does not match the ROM artifact")
+    return source, rom, manifest
 
 
-def _stage_outputs(root, label, expected):
-    source = private_directory(Path(root) / "build/images" / label)
+def _stage_outputs(root, label, expected, parent=None):
+    source = private_directory((parent or Path(root) / "build/images") / label)
     result = read_json(regular_file(source, "result.json"))
     if not result.get("passed") or not result.get("artifacts"):
         raise SafetyError(f"Expected a successful {expected} stage")
@@ -285,7 +289,7 @@ def assemble(root, tools_label, root_label, rootfs_label, label):
             "scope": "Development disk assembled; unsigned and not yet booted"}
 
 
-def check_boot(root, tools_label, device_label, label):
+def check_boot(root, tools_label, device_label, firmware_label, label):
     """Boot the development disk in QEMU Q35 and assert the gate outcome."""
     builder.verify_tools(root, tools_label)
     device_source, device_output, device_result = _stage_outputs(root, device_label, "device")
@@ -293,7 +297,7 @@ def check_boot(root, tools_label, device_label, label):
     manifest = read_json(regular_file(device_source, "device.json"))
     if manifest.get("kernel_cmdline") != KERNEL_CMDLINE or not manifest.get("deterministic_development_ids"):
         raise SafetyError("Device manifest does not match the development harness contract")
-    firmware = ovmf_pins(root)
+    firmware_source, rom, firmware_manifest = firmware_rom(root, firmware_label)
     qemu = shutil.which("qemu-system-x86_64")
     pins = load_lock(root, "host-tools")["tools"]["qemu-system-x86_64"]
     if not qemu or sha256(Path(qemu)) != pins["sha256"]:
@@ -305,16 +309,16 @@ def check_boot(root, tools_label, device_label, label):
         runs = {}
         for name, corrupt in (("good", False), ("corrupt", True)):
             target = work / ("device-" + name + ".raw")
-            # Private copies: QEMU opens the disk read-write, so the stage
-            # artifact must never be the file the guest can touch.
+            # Private copies: QEMU opens the disk and the firmware flash
+            # read-write, so stage artifacts must never be guest-writable.
             shutil.copyfile(disk, target)
             if corrupt:
                 rootfs.flip_byte(target, ROOT_OFFSET + rootfs.ROOT_BYTES // 2)
-            variables = work / ("vars-" + name + ".fd")
-            shutil.copyfile(firmware["vars"], variables)
+            flash = work / ("flash-" + name + ".rom")
+            shutil.copyfile(rom, flash)
             serial = work / ("serial-" + name + ".log")
             builder.logged(work, "qemu-boot-" + name, qemu_command(
-                firmware["code"], variables, target, serial, kvm=kvm), timeout=1800)
+                flash, target, serial, kvm=kvm), timeout=1800)
             markers, denial = boot_verdict(serial.read_text(errors="replace"))
             runs[name] = {"markers": markers, "denial": denial, "exited": True}
             if corrupt:
@@ -329,11 +333,15 @@ def check_boot(root, tools_label, device_label, label):
         write_json(work / "result.json", {
             "passed": True, "kvm": kvm,
             "positive_boot": runs["good"], "corruption_control": runs["corrupt"],
-            "ovmf": {role: sha256(path) for role, path in firmware.items()},
+            "firmware": {"rom_sha256": sha256(rom),
+                         "sdk_image": firmware_manifest.get("sdk_image"),
+                         "sources": len(firmware_manifest.get("sources", {})),
+                         "evidence": firmware_source.name},
             "qemu_sha256": pins["sha256"],
             "qemu_boot_verified": True, "boot_chain_qualified": False,
-            "scope": "QEMU Q35 development harness; unsigned dev profile with OVMF, "
-                     "not Secure Boot, physical-device or production qualification"})
+            "scope": "QEMU Q35 development harness; unsigned dev profile on the self-built "
+                     "coreboot/EDK II firmware, not Secure Boot, physical-device or "
+                     "production qualification"})
     except Exception as error:
         write_json(work / "result.json", {"passed": False, "error": str(error),
                                           "boot_chain_qualified": False})

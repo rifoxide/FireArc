@@ -13,7 +13,7 @@ import sys
 import tarfile
 import uuid
 
-from . import builder, device, firmware, initrd, rootfs, sbom
+from . import builder, device, firmware, firmware_build, initrd, rootfs, sbom
 from .inputs import validate_locks
 from .integrity import SafetyError, private_directory, read_json, regular_file, sha256, verify_file, write_json
 
@@ -23,7 +23,8 @@ DEPENDENCIES = {
     "rootfs": ("tools", "root"), "check-initrd": ("tools", "root"),
     "check-rootfs": ("tools", "rootfs"), "sbom": ("packages-root",),
     "firmware-sources": (),
-    "device": ("tools", "root", "rootfs"), "check-boot": ("tools", "device"),
+    "firmware-build": ("firmware-sources",),
+    "device": ("tools", "root", "rootfs"), "check-boot": ("tools", "device", "firmware-build"),
 }
 
 
@@ -109,6 +110,14 @@ class Pipeline:
             subprocess.run(["docker", "image", "inspect", value["image_id"]], check=True,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
+    STAGE_INPUTS = {
+        # Stages whose sources are wider than their lock file still use the
+        # whole project digest; these list every input they actually read.
+        "firmware-sources": ["locks/firmware-sources.json", "src/firearc/firmware.py", "src/firearc/inputs.py"],
+        "firmware-build": ["locks/firmware-sources.json", "images/firmware/q35-coreboot.config",
+                           "src/firearc/firmware.py", "src/firearc/inputs.py", "src/firearc/firmware_build.py"],
+    }
+
     def ensure(self, stage):
         if stage in self.memo:
             return self.memo[stage]
@@ -117,6 +126,8 @@ class Pipeline:
             source = sha256(self.root / "locks/debian-build.json")
         elif stage == "packages-root":
             source = sha256(self.root / "locks/root.json")
+        elif stage in self.STAGE_INPUTS:
+            source = [sha256(self.root / name) for name in self.STAGE_INPUTS[stage]]
         else:
             source = self.digest
         fingerprint = hashlib.sha256(json.dumps([source, {name: value["receipt_sha256"] for name, value in dependencies.items()}, sys.version], sort_keys=True).encode()).hexdigest()
@@ -172,11 +183,15 @@ class Pipeline:
         if stage == "firmware-sources":
             firmware.fetch(root, build_id, allow_network=self.online)
             return self.build / "firmware" / build_id, {}
+        if stage == "firmware-build":
+            firmware_build.build(root, deps["firmware-sources"]["id"], build_id, allow_network=self.online)
+            return self.build / "firmware-build" / build_id, {}
         if stage == "device":
             device.assemble(root, deps["tools"]["id"], deps["root"]["id"], deps["rootfs"]["id"], build_id)
             return self.build / "images" / build_id, {}
         if stage == "check-boot":
-            device.check_boot(root, deps["tools"]["id"], deps["device"]["id"], build_id)
+            device.check_boot(root, deps["tools"]["id"], deps["device"]["id"],
+                              deps["firmware-build"]["id"], build_id)
             return self.build / "images" / build_id, {}
         if stage == "metadata":
             target = builder.metadata_path(root)
@@ -262,6 +277,7 @@ def run(root, command, *, online=False):
         elif command == "build-root": pipeline.ensure("root")
         elif command == "sbom": pipeline.ensure("sbom")
         elif command == "firmware-sources": pipeline.ensure("firmware-sources")
+        elif command == "firmware-build": pipeline.ensure("firmware-build")
         elif command == "device": pipeline.ensure("device")
         elif command == "check-boot": pipeline.ensure("check-boot")
         elif command == "check-initrd": pipeline.ensure("check-initrd")

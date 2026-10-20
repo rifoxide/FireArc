@@ -24,9 +24,11 @@ class FakePipeline(pipeline.Pipeline):
         self.calls.append(stage)
         if self.fail == stage:
             raise SafetyError("synthetic failure")
-        group = "dependencies" if stage in {"metadata", "packages-tools", "packages-root", "tools", "sbom"} else "images"
+        group = ("dependencies" if stage in {"metadata", "packages-tools", "packages-root", "tools", "sbom"}
+                 else "firmware" if stage == "firmware-sources"
+                 else "firmware-build" if stage == "firmware-build" else "images")
         work = self.build / group / build_id
-        work.mkdir(mode=0o700)
+        work.mkdir(mode=0o700, parents=True)
         if stage == "metadata":
             (work / "repository").mkdir()
             (work / "repository/index").write_text("authenticated index fixture")
@@ -43,6 +45,18 @@ class FakePipeline(pipeline.Pipeline):
             output.mkdir()
             (output / "sbom.json").write_text("{}")
             write_json(work / "result.json", {"passed": True, "artifacts": {"sbom.json": sha256(output / "sbom.json")}})
+            return work, {}
+        elif stage == "firmware-sources":
+            output = work / "output"
+            output.mkdir()
+            (output / "sources.json").write_text("{}")
+            write_json(work / "result.json", {"passed": True, "artifacts": {"sources.json": sha256(output / "sources.json")}})
+            return work, {}
+        elif stage == "firmware-build":
+            output = work / "output"
+            output.mkdir()
+            (output / "coreboot.rom").write_text("rom fixture")
+            write_json(work / "result.json", {"passed": True, "artifacts": {"coreboot.rom": sha256(output / "coreboot.rom")}})
             return work, {}
         elif stage == "device":
             output = work / "output"
@@ -72,11 +86,14 @@ class PipelineTests(unittest.TestCase):
         self.addCleanup(lambda: [item.stop() for item in reversed(self.patches)])
 
     def workspace(self, root):
-        for name in ["src/firearc", "images", "containers", "locks"]:
+        for name in ["src/firearc", "images/firmware", "containers", "locks"]:
             (root / name).mkdir(parents=True, exist_ok=True)
         (root / "src/firearc/example.py").write_text("initial")
         for name in ["debian-build", "root"]:
             (root / f"locks/{name}.json").write_text('{"schema":1}')
+        for name in pipeline.Pipeline.STAGE_INPUTS["firmware-build"]:
+            (root / name).parent.mkdir(parents=True, exist_ok=True)
+            (root / name).write_text("firmware input fixture")
 
     def test_automatic_dependencies_and_cached_success_need_no_labels(self):
         with temporary() as root:
@@ -95,7 +112,8 @@ class PipelineTests(unittest.TestCase):
             first = FakePipeline(root, online=True)
             record = first.ensure("check-boot")
             self.assertEqual(first.calls, ["metadata", "packages-tools", "tools", "packages-root",
-                                            "root", "rootfs", "device", "check-boot"])
+                                            "root", "rootfs", "device", "firmware-sources",
+                                            "firmware-build", "check-boot"])
             self.assertIn("check-boot-", record["id"])
             second = FakePipeline(root)
             self.assertEqual(second.ensure("check-boot"), record)

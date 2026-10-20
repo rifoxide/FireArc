@@ -19,7 +19,7 @@ def main():
     commands = parser.add_subparsers(dest="command", required=True)
     for name in ("doctor", "verify-inputs", "secrets", "status"):
         commands.add_parser(name)
-    for name in ("bootstrap", "build-tools", "build-root", "build-rootfs", "build", "sbom", "firmware-sources", "device", "check-boot", "check-initrd", "check-rootfs", "verify-build"):
+    for name in ("bootstrap", "build-tools", "build-root", "build-rootfs", "build", "sbom", "firmware-sources", "firmware-build", "device", "check-boot", "check-initrd", "check-rootfs", "verify-build"):
         command = commands.add_parser(name)
         command.add_argument("--online", action="store_true", help="Allow pinned dependency downloads")
     for name in ("clean", "reproduce"):

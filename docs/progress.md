@@ -22,29 +22,35 @@ qualification. The complete secured appliance is not yet implemented.
   with a deterministic serial number derived from the closure fingerprint.
 - Exact-commit acquisition of the pinned upstream firmware repositories
   (`just firmware-sources --online`), with per-source tree records and offline
-  re-verification. The seven pinned submodules are materialized inside the
+  re-verification. The fourteen pinned submodules are materialized inside the
   coreboot/EDK II checkouts under a gitlink census enforced against each parent
-  tree, declining every unlisted upstream submodule. Nothing is built or
-  trusted yet.
+  tree, declining every unlisted upstream submodule. Nothing is trusted yet.
+- Self-built QEMU Q35 firmware (`just firmware-build`): the pinned closure
+  compiles offline in the pinned coreboot SDK container into the monolithic
+  8 MiB ROM with the EDK II payload, with manifest-bound inputs, toolchain
+  digests and CBFS inventory. `just check-boot` now boots the self-built
+  firmware (writable SMMSTORE pflash, AHCI disk) instead of host OVMF; the
+  integrity gate passes and the corruption control still denies.
 - Development installed-device profile (`just device`): a GPT disk with ESP,
   slot-A root and hash partitions assembled offline from the frozen payloads,
   with systemd-boot taken from the same root archive.
 - QEMU Q35 boot gate verification (`just check-boot`): the development disk
-  boots through OVMF and systemd-boot; the initramfs gate performs full
-  verity preverification, read-only mapping and sysroot mount, with a
-  corrupted-root negative control that is denied at the exact flip offset.
-  This runtime execution found and fixed four real gate defects.
+  boots through systemd-boot on the self-built coreboot/EDK II firmware; the
+  initramfs gate performs full verity preverification, read-only mapping and
+  sysroot mount, with a corrupted-root negative control that is denied at the
+  exact flip offset. Runtime execution found and fixed four real gate defects.
 
 ## Validation
 
-The label-free bootstrap/build/verification pipeline and 88 offline tests pass.
+The label-free bootstrap/build/verification pipeline and 93 offline tests pass.
 The fresh-clone build/verification passed, and `just reproduce --yes` completed
 two empty-cache download/build/verification rounds with **byte-identical
 payloads** (kernel, initramfs, root tar, ext4, verity tree, authority). The
 earlier failures from unsorted tar members and an unpinned ext4 directory-hash
 seed are fixed. Scope limits (single host/Python, preserved Docker content
 cache, OS payloads only) are recorded with the result.
-The development device boot gate passed under QEMU Q35 with OVMF and KVM,
+The development device boot gate passed under QEMU Q35 with KVM, first under
+the host OVMF fixture and then with the self-built coreboot/EDK II firmware,
 including the corrupted-root denial control; see
 [device boot validation](validation/device-boot.md) for evidence and limits.
 Results are recorded in [build-system validation](validation/build-system.md)

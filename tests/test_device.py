@@ -9,7 +9,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 from firearc import device, rootfs
-from firearc.integrity import SafetyError, read_json, write_json
+from firearc.integrity import SafetyError, read_json, sha256, write_json
 from support import temporary
 
 AUTHORITY = {"schema": 1, "format": 1, "algorithm": "sha256", "data_bytes": 4 * 1024**3,
@@ -113,19 +113,24 @@ class DeviceTests(unittest.TestCase):
         self.assertEqual(device.LOADER_CONF, "timeout 0\ndefault firearc-a\neditor no\n")
 
     def test_qemu_command_shape(self):
-        command = device.qemu_command("/fw/CODE.fd", "/run/vars.fd", "/disks/dev.raw", "/run/s.log", kvm=False)
+        command = device.qemu_command("/run/flash.rom", "/disks/dev.raw", "/run/s.log", kvm=False)
         joined = " ".join(command)
         self.assertEqual(command[0], "qemu-system-x86_64")
         self.assertIn("-machine q35", joined)
         self.assertIn("-accel tcg", joined)
-        self.assertIn("accel kvm", " ".join(device.qemu_command(
-            "/c", "/v", "/d", "/s", kvm=True)))
+        self.assertIn("accel kvm", " ".join(device.qemu_command("/f", "/d", "/s", kvm=True)))
         for required in ("-no-reboot", "-display none", "-net none", "-nodefaults",
-                         "if=pflash,format=raw,readonly=on,file=/fw/CODE.fd",
-                         "if=pflash,format=raw,file=/run/vars.fd",
-                         "file=/disks/dev.raw,format=raw,if=virtio",
+                         "if=pflash,format=raw,file=/run/flash.rom",
+                         "-device ahci,id=ahci0",
+                         "if=none,id=disk0,file=/disks/dev.raw,format=raw",
+                         "-device ide-hd,drive=disk0,bus=ahci0.0",
                          "-serial file:/run/s.log"):
             self.assertIn(required, joined)
+        # The self-built payload has no virtio drivers and no CODE/VARS split:
+        # exactly one pflash drive and no virtio interface may appear.
+        self.assertEqual(joined.count("if=pflash"), 1)
+        self.assertNotIn("if=virtio", joined)
+        self.assertNotIn("readonly=on", joined)
 
     def test_boot_verdict_requires_distinct_success_and_denial_evidence(self):
         good = "\n".join(device.POSITIVE_MARKERS) + "\n"
@@ -150,18 +155,37 @@ class DeviceTests(unittest.TestCase):
         with self.assertRaises(SafetyError):
             device.boot_verdict("x" * (8 * 1024 * 1024 + 1))
 
-    def test_ovmf_pins_verify_against_host_files(self):
-        result = device.ovmf_pins(ROOT)
-        self.assertEqual(set(result), {"code", "vars"})
-        self.assertEqual(result["code"].name, "OVMF_CODE.4m.fd")
-        wrong = {"ovmf": {"code": {"path": "/usr/share/OVMF/x64/OVMF_CODE.4m.fd", "sha256": "0" * 64}}}
-        with patch.object(device, "load_lock", return_value={"ovmf": wrong["ovmf"] | {
-                "vars": {"path": str(result["vars"]), "sha256": "1" * 64}}}):
-            with self.assertRaises(SafetyError):
-                device.ovmf_pins(ROOT)
-        with patch.object(device, "load_lock", return_value={"ovmf": {"code": wrong["ovmf"]["code"]}}):
-            with self.assertRaises(SafetyError):
-                device.ovmf_pins(ROOT)
+    def test_firmware_rom_requires_a_consistent_firmware_stage(self):
+        with temporary() as root:
+            source = root / "build/firmware-build/fw-x"
+            output = source / "output"
+            output.mkdir(parents=True)
+            rom = output / "coreboot.rom"
+            rom.write_bytes(b"F" * device.FIRMWARE_BYTES)
+            digest = sha256(rom)
+            write_json(output / "manifest.json", {"coreboot.rom": {"sha256": digest,
+                                                                  "bytes": device.FIRMWARE_BYTES}})
+            with patch.object(device, "_stage_outputs") as outputs:
+                outputs.return_value = (source, output, {"passed": True,
+                                                         "artifacts": {"coreboot.rom": digest,
+                                                                       "manifest.json": "0" * 64}})
+                resolved, path, manifest = device.firmware_rom(root, "fw-x")
+                self.assertEqual(path, rom)
+                self.assertEqual(manifest["coreboot.rom"]["sha256"], digest)
+            for artifacts in ({"coreboot.rom": "0" * 64, "manifest.json": "0" * 64},):
+                with patch.object(device, "_stage_outputs") as outputs:
+                    outputs.return_value = (source, output, {"passed": True, "artifacts": artifacts})
+                    with self.assertRaises(SafetyError):
+                        device.firmware_rom(root, "fw-x")
+            # A manifest describing a different image than the artifact fails.
+            with patch.object(device, "_stage_outputs") as outputs:
+                outputs.return_value = (source, output, {"passed": True,
+                                                         "artifacts": {"coreboot.rom": digest,
+                                                                       "manifest.json": "0" * 64}})
+                with patch.object(device, "read_json", return_value={"coreboot.rom": {
+                        "sha256": "0" * 64, "bytes": device.FIRMWARE_BYTES}}):
+                    with self.assertRaises(SafetyError):
+                        device.firmware_rom(root, "fw-x")
 
 
 if __name__ == "__main__":
