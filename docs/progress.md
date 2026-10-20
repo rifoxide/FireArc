@@ -38,6 +38,20 @@ qualification. The complete secured appliance is not yet implemented.
   requires every flash byte outside SMMSTORE to survive each run unchanged;
   both baseline boots confined 33,586 bytes of variable initialization to
   SMMSTORE (see [firmware-layout validation](validation/firmware-layout.md)).
+- Persistent installed-device profile (`just device-provision`/
+  `just device-boot`): a per-device directory carries the OS disk, the
+  writable firmware copy and one isolated swtpm TPM 2.0 state dir across cold
+  starts. Two cold-start boots each reached the verified-root marker, bound
+  the TPM through ACPI/TIS (`tpm_version_major=2`, `/dev/tpm0`, `/dev/tpmrm0`)
+  and confined all flash writes to SMMSTORE; SMMSTORE and TPM state carried
+  over between boots byte-exactly and are asserted stable outside guest
+  execution. Found and fixed on the way: a dev-unit shutdown race against
+  `switch_root` (now `poweroff -f`). See
+  [device-profile validation](validation/device-profile.md).
+- Bounded evidence retention (`just prune`): every successful stage build now
+  prunes superseded evidence directories (keeps current + previous per stage),
+  never touching device-profile-pinned provenance; the first run freed
+  149 GB accumulated by whole-project-digest stage rebuilds.
 - Development installed-device profile (`just device`): a GPT disk with ESP,
   slot-A root and hash partitions assembled offline from the frozen payloads,
   with systemd-boot taken from the same root archive.
@@ -49,7 +63,7 @@ qualification. The complete secured appliance is not yet implemented.
 
 ## Validation
 
-The label-free bootstrap/build/verification pipeline and 106 offline tests pass.
+The label-free bootstrap/build/verification pipeline and 126 offline tests pass.
 The fresh-clone build/verification passed, and `just reproduce --yes` completed
 two empty-cache download/build/verification rounds with **byte-identical
 payloads** (kernel, initramfs, root tar, ext4, verity tree, authority). The

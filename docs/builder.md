@@ -89,6 +89,14 @@ Logs, generated packages and images stay outside Git.
 
 ## Clean test
 
+Every successful stage build publishes a new immutable evidence directory and
+automatically prunes superseded ones, keeping each stage's current directory
+plus the previous generation (`just prune` runs the same retention manually,
+`--keep N` adjusts the budget). Current directories are exactly the ids in
+`build/state.json`, and device profiles pin their provenance to older
+evidence directories; those are never pruned. Deletion reuses the mapped-UID
+namespace so container-owned files are removable.
+
 `just clean --yes` deletes only `build/`, refusing symlinked/mounted cleanup
 targets. `just reproduce --yes` performs two empty-project-cache acquisition,
 build and validation cycles and compares kernel, initramfs, root tar, ext4,

@@ -47,6 +47,21 @@ firmware-build *options:
 firmware-layout *options:
     python3 -B scripts/firearc.py firmware-layout "$@"
 
+# Explicitly create (or --replace) a persistent device profile: disk, firmware
+# flash copy and one isolated swtpm TPM state directory. Never resets silently.
+device-provision *options:
+    python3 -B scripts/firearc.py device-provision "$@"
+
+# Cold-start a persistent profile repeatedly; asserts boot markers, TPM TIS/ACPI
+# binding, write confinement and flash/TPM identity continuity across boots.
+device-boot *options:
+    python3 -B scripts/firearc.py device-boot "$@"
+
+# Delete superseded stage evidence; keeps each stage's current + previous dir
+# (runs automatically after every successful stage build, too).
+prune *options:
+    python3 -B scripts/firearc.py prune "$@"
+
 # Assemble the unsigned development installed-device disk (ESP + slot A).
 device *options:
     python3 -B scripts/firearc.py device "$@"

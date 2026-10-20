@@ -64,7 +64,8 @@ RAUC activation/rollback, recovery and hardware acceptance remain pending.
 Useful commands: `just status`, `just build-tools`, `just build-root`,
 `just build-rootfs`, `just check-initrd`, `just check-rootfs`, `just sbom`,
 `just firmware-sources --online`, `just firmware-build`, `just firmware-layout`,
-`just device`, `just check-boot`.
+`just device`, `just check-boot`, `just device-provision`, `just device-boot`,
+`just prune`.
 
 ## Documentation
 

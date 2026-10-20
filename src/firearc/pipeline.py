@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import stat
 import subprocess
@@ -56,6 +57,15 @@ def project_lock(root):
         os.close(descriptor)
 
 
+def _remove_tree(path):
+    try:
+        shutil.rmtree(path)
+    except OSError:
+        # Full ID mappings let cleanup remove owned rootless-build subordinate IDs.
+        subprocess.run(["unshare", "--user", "--map-root-user", "--map-auto", "--net", "--mount",
+                        sys.executable, "-B", "-c", "import shutil,sys; shutil.rmtree(sys.argv[1])", str(path)], check=True)
+
+
 def clean(root, *, confirmed=False):
     if not confirmed:
         raise SafetyError("Use just clean --yes to remove project build outputs")
@@ -68,9 +78,73 @@ def clean(root, *, confirmed=False):
         mount = Path(line.split()[4].replace("\\040", " "))
         if mount == target or target in mount.parents:
             raise SafetyError("Refusing to clean a mounted build tree")
-    # Full ID mappings let cleanup remove owned rootless-build subordinate IDs.
-    subprocess.run(["unshare", "--user", "--map-root-user", "--map-auto", "--net", "--mount",
-                    sys.executable, "-B", "-c", "import shutil,sys; shutil.rmtree(sys.argv[1])", str(target)], check=True)
+    _remove_tree(target)
+
+
+# Stage evidence directories are named <stage>-<12 hex>; metadata is
+# content-addressed with 16 hex and never matches a stage family here.
+STAGE_DIR_PATTERN = re.compile(r"^(?P<stage>[a-z][a-z0-9-]*?)-(?P<id>[0-9a-f]{12})$")
+
+
+def _tree_bytes(path):
+    total = 0
+    for item in path.rglob("*"):
+        try:
+            total += item.lstat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def prune(root, *, keep=1):
+    """Delete superseded stage evidence: keep the current dir plus `keep` previous.
+
+    Current directories are exactly the ids in build/state.json. Device
+    profiles pin their provenance to older evidence directories (disk and
+    firmware labels); those stay untouched. Deleting uses the same mapped-UID
+    cleanup as `clean` because container-built files may not be user-owned.
+    """
+    build = Path(root) / "build"
+    if not build.is_dir():
+        return {"removed": [], "kept": [], "bytes_freed": 0}
+    protected = set()
+    state_path = build / "state.json"
+    if state_path.exists():
+        state = read_json(regular_file(build, "state.json"))
+        protected.update(record["id"] for record in state.get("stages", {}).values()
+                         if isinstance(record, dict) and "id" in record)
+    devices = build / "devices"
+    if devices.is_dir():
+        for profile_path in sorted(devices.glob("*/profile.json")):
+            provenance = read_json(regular_file(profile_path.parent, profile_path.name)) \
+                .get("provenance", {})
+            for key in ("device_label", "firmware_label"):
+                if provenance.get(key):
+                    protected.add(provenance[key])
+    families = [build / "images", build / "firmware", build / "firmware-build",
+                build / "firmware-layout", builder.parent(root)]
+    stage_names = set(DEPENDENCIES)
+    by_stage = {}
+    for family in families:
+        if not family.is_dir():
+            continue
+        for entry in sorted(family.iterdir()):
+            match = STAGE_DIR_PATTERN.match(entry.name)
+            if not match or match.group("stage") not in stage_names:
+                continue
+            if entry.name in protected or not entry.is_dir():
+                continue
+            by_stage.setdefault((family.name, match.group("stage")), []).append(entry)
+    removed, kept = [], []
+    for (_, stage), entries in sorted(by_stage.items()):
+        ordered = sorted(entries, key=lambda path: path.stat().st_mtime, reverse=True)
+        kept.extend(entry.name for entry in ordered[:max(keep, 0)])
+        for entry in ordered[max(keep, 0):]:
+            size = _tree_bytes(entry)
+            _remove_tree(entry)
+            removed.append({"dir": entry.name, "bytes": size})
+    return {"removed": removed, "kept": sorted(kept),
+            "bytes_freed": sum(item["bytes"] for item in removed)}
 
 
 class Pipeline:
@@ -177,6 +251,12 @@ class Pipeline:
                   "receipt": receipt.relative_to(self.root).as_posix(), "receipt_sha256": sha256(receipt)}
         self.state["stages"][stage] = record
         self.save()
+        try:
+            # Bounded retention: superseded evidence of this stage goes away as
+            # soon as the new record is published; failures only warn.
+            prune(self.root)
+        except (SafetyError, OSError) as error:
+            print(f"Warning: superseded evidence not pruned: {error}", file=sys.stderr)
         self.memo[stage] = record
         return record
 

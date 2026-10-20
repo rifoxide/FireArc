@@ -178,12 +178,21 @@ class PipelineTests(unittest.TestCase):
             with self.assertRaises(SafetyError): pipeline.clean(root, confirmed=True)
             self.assertEqual((outside / "keep").read_text(), "keep")
 
-    def test_clean_targets_only_build_in_rootless_namespace(self):
+    def test_clean_removes_build_and_falls_back_to_rootless_deletion(self):
         with temporary() as root:
             self.workspace(root)
             (root / "build").mkdir(mode=0o700)
+            (root / "build/leftover").write_text("x")
+            # Plain removal suffices for user-owned trees: no namespace needed.
             with patch.object(pipeline.subprocess, "run") as run:
                 pipeline.clean(root, confirmed=True)
+            self.assertFalse((root / "build").exists())
+            run.assert_not_called()
+            # Container-owned leftovers must go through the mapped-UID fallback.
+            (root / "build").mkdir(mode=0o700)
+            with patch.object(pipeline.shutil, "rmtree", side_effect=OSError("denied")):
+                with patch.object(pipeline.subprocess, "run") as run:
+                    pipeline.clean(root, confirmed=True)
             command = run.call_args.args[0]
             self.assertEqual(command[-1], str(root / "build"))
             self.assertIn("--user", command)
