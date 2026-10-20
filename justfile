@@ -31,6 +31,10 @@ build-root *options:
 build-rootfs *options:
     python3 -B scripts/firearc.py build-rootfs "$@"
 
+# Preliminary CycloneDX inventory of the locked root package closure.
+sbom *options:
+    python3 -B scripts/firearc.py sbom "$@"
+
 build *options:
     python3 -B scripts/firearc.py build "$@"
 

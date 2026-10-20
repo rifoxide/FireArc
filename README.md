@@ -20,9 +20,9 @@ just verify-build    # static initrd/unit checks and filesystem corruption tests
 ```
 
 Generated binaries have stable paths under **`build/output/`**:
-`kernel.efi`, `initrd.img`, `root.tar`, `root.ext4`, `root.verity`, and
-`verity-authority.json`. Dependencies and successful builds are selected
-automatically; commands never require manual attempt labels.
+`kernel.efi`, `initrd.img`, `root.tar`, `root.ext4`, `root.verity`,
+`verity-authority.json`, and `sbom.json`. Dependencies and successful builds
+are selected automatically; commands never require manual attempt labels.
 
 Git contains source, configuration and exact version/URL/hash locks—not package
 caches, downloaded sources, compiled images, private keys or device state.
@@ -62,7 +62,7 @@ RAUC activation/rollback, recovery and hardware acceptance remain pending.
 | `build/` | Ignored downloads, logs, state and generated binaries |
 
 Useful commands: `just status`, `just build-tools`, `just build-root`,
-`just build-rootfs`, `just check-initrd`, `just check-rootfs`.
+`just build-rootfs`, `just check-initrd`, `just check-rootfs`, `just sbom`.
 
 ## Documentation
 

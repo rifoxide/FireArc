@@ -13,7 +13,7 @@ import sys
 import tarfile
 import uuid
 
-from . import builder, initrd, rootfs
+from . import builder, initrd, rootfs, sbom
 from .inputs import validate_locks
 from .integrity import SafetyError, private_directory, read_json, regular_file, sha256, verify_file, write_json
 
@@ -21,7 +21,7 @@ DEPENDENCIES = {
     "metadata": (), "packages-tools": ("metadata",), "packages-root": ("metadata",),
     "tools": ("packages-tools",), "root": ("tools", "packages-root"),
     "rootfs": ("tools", "root"), "check-initrd": ("tools", "root"),
-    "check-rootfs": ("tools", "rootfs"),
+    "check-rootfs": ("tools", "rootfs"), "sbom": ("packages-root",),
 }
 
 
@@ -186,6 +186,9 @@ class Pipeline:
             result = builder.build_tools(root, build_id)
             builder.export_tools(root, build_id)
             return work, {"image_id": result["image_id"]}
+        if stage == "sbom":
+            sbom.generate(root, deps["packages-root"]["id"], build_id)
+            return builder.parent(root) / build_id, {}
         tools = deps["tools"]["id"]
         if stage == "root":
             builder.build_root(root, tools, deps["packages-root"]["id"], build_id)
@@ -208,12 +211,14 @@ class Pipeline:
     def publish(self):
         root = self.ensure("root")
         filesystem = self.ensure("rootfs")
+        inventory = self.ensure("sbom")
         root_output = self.build / "images" / root["id"] / "output"
         fs_output = self.build / "images" / filesystem["id"] / "output"
         fs_result = read_json(fs_output.parent / "result.json")
         outputs = {"root.tar": root_output / "firearc-root.tar", "kernel.efi": root_output / "firearc-root.vmlinuz",
                    "initrd.img": root_output / "firearc-initrd.img", "root.ext4": fs_output / fs_result["root_payload"],
-                   "root.verity": fs_output / "root.verity", "verity-authority.json": fs_output / "verity-authority.json"}
+                   "root.verity": fs_output / "root.verity", "verity-authority.json": fs_output / "verity-authority.json",
+                   "sbom.json": builder.parent(self.root) / inventory["id"] / "output" / "sbom.json"}
         directory = private_directory(self.build / "output", create=True)
         for name, source in outputs.items():
             destination = directory / name
@@ -236,6 +241,7 @@ def run(root, command, *, online=False):
             pipeline.ensure("packages-root")
         elif command == "build-tools": pipeline.ensure("tools")
         elif command == "build-root": pipeline.ensure("root")
+        elif command == "sbom": pipeline.ensure("sbom")
         elif command == "check-initrd": pipeline.ensure("check-initrd")
         elif command == "check-rootfs": pipeline.ensure("check-rootfs")
         else:

@@ -18,6 +18,8 @@ qualification. The complete secured appliance is not yet implemented.
   no raw-root fallback and no-shell failure units.
 - Static embedded-code/unit audit and copied-payload corruption controls.
 - Clean/reproduction commands that rebuild from empty project output directories.
+- Preliminary CycloneDX 1.5 inventory of the locked root closure (`just sbom`),
+  with a deterministic serial number derived from the closure fingerprint.
 
 ## Validation
 
@@ -34,13 +36,12 @@ byte-reproducibility result is implied by the implementation list above.
 
 ## Next gates
 
-1. Produce the preliminary package inventory/CycloneDX SBOM from the locked closure.
-2. Assemble slot-specific authority/UKI inputs and qualify the signed boot path,
+1. Assemble slot-specific authority/UKI inputs and qualify the signed boot path,
    actual systemd/udev scheduling and failure behavior.
-3. Implement the pinned source-built firmware path and qualify firmware trust,
+2. Implement the pinned source-built firmware path and qualify firmware trust,
    authenticated variables and unique TPM ACPI/event-log ownership.
-4. Implement installed A/B storage, TPM-bound LUKS2/escrow, RAUC activation/health/
-   rollback, attestation, restricted recovery and release hardening/SBOM/CI.
+3. Implement installed A/B storage, TPM-bound LUKS2/escrow, RAUC activation/health/
+   rollback, attestation, restricted recovery and release hardening/CI.
 
 G0/G1/G3 and later acceptance gates remain open. Hardware, legal review,
 production signing custody and external design documents are still dependencies.

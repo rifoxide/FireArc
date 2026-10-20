@@ -24,7 +24,7 @@ class FakePipeline(pipeline.Pipeline):
         self.calls.append(stage)
         if self.fail == stage:
             raise SafetyError("synthetic failure")
-        group = "dependencies" if stage in {"metadata", "packages-tools", "packages-root", "tools"} else "images"
+        group = "dependencies" if stage in {"metadata", "packages-tools", "packages-root", "tools", "sbom"} else "images"
         work = self.build / group / build_id
         work.mkdir(mode=0o700)
         if stage == "metadata":
@@ -38,6 +38,12 @@ class FakePipeline(pipeline.Pipeline):
             for name in ["build-result.json", "export-result.json", "tools-inventory.json", "packages.json"]:
                 write_json(work / name, {"passed": True})
             return work, {"image_id": "sha256:" + "a" * 64}
+        elif stage == "sbom":
+            output = work / "output"
+            output.mkdir()
+            (output / "sbom.json").write_text("{}")
+            write_json(work / "result.json", {"passed": True, "artifacts": {"sbom.json": sha256(output / "sbom.json")}})
+            return work, {}
         else:
             output = work / "output"
             output.mkdir()
@@ -112,7 +118,7 @@ class PipelineTests(unittest.TestCase):
             self.workspace(root)
             build = FakePipeline(root, online=True)
             outputs = build.publish()
-            self.assertEqual(set(outputs), {"kernel.efi", "initrd.img", "root.tar", "root.ext4", "root.verity", "verity-authority.json"})
+            self.assertEqual(set(outputs), {"kernel.efi", "initrd.img", "root.tar", "root.ext4", "root.verity", "verity-authority.json", "sbom.json"})
             self.assertTrue((root / "build/output/root.ext4").is_symlink())
             (root / "build/output/root.ext4").unlink()
             (root / "build/output/root.ext4").write_text("keep")
