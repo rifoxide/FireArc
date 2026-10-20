@@ -20,14 +20,22 @@ label-free `just build` and `just verify-build` completed successfully.
 An isolated local Git clone of the source-only working snapshot passed all 67
 offline tests. Its fresh upstream acquisition/build/verification also passed.
 
-The main checkout completed both empty-cache download/build/verification rounds,
-but **byte reproducibility failed**: kernel, initramfs and root tar matched;
-ext4, verity and authority hashes differed. The separate clone also produced a
-different root tar. The cause is not yet diagnosed. Successful reconstruction
-and component checks do not establish reproducibility. The generated comparison
-is retained in `build/reproducibility.json` until the next clean run replaces it.
+### Byte reproducibility: PASS (2026-10-20)
 
-### Reproducibility diagnosis and fix under test
+`just reproduce --yes` completed two full empty-cache download/build/verification
+rounds. All six payload hashes — kernel, initramfs, root tar, ext4, verity tree
+and verity authority — are byte-identical between rounds. The machine-readable
+record is `build/reproducibility.json` (`passed: true`, one host/Python).
+
+Earlier rounds had failed with differing ext4/verity/authority (and a differing
+root tar in the separate clone). Successful reconstruction and component checks
+alone do not establish reproducibility; this comparison does, within its scope.
+
+Scope limits: single host, single Python, shared Docker content cache preserved,
+and only the OS build payloads above. Firmware, signed envelopes, device
+provisioning randomness and cross-host reproduction remain unproven.
+
+### Reproducibility diagnosis and fix
 
 Comparing every root tar member's content and metadata found no differences
 between the main and separate-clone archives; only enumeration order differed.
@@ -36,10 +44,10 @@ now supplies name sorting and stable PAX header names.
 
 `dumpe2fs -h` on both ext4 images showed identical UUID/geometry/creation times
 but different directory-hash seeds. The rootfs recipe now explicitly fixes that
-public seed and requests eager inode-table/journal initialization. A new clean
-comparison must pass before the byte-reproducibility failure is considered fixed.
-The patched builder/root/rootfs and static initrd/corruption checks pass through
-`just verify-build`; all 69 offline tests pass. The clean comparison is running.
+public seed and requests eager inode-table/journal initialization.
+
+After both fixes, the two clean rounds above passed byte-identical; all 69
+offline tests pass and `just verify-build` passes with the patched builder.
 
 Commands: [build system](../builder.md). Machine-readable results are generated
 under ignored `build/`; `build/reproducibility.json` contains the clean comparison.

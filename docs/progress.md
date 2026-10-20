@@ -22,21 +22,19 @@ qualification. The complete secured appliance is not yet implemented.
 ## Validation
 
 The label-free bootstrap/build/verification pipeline and 69 offline tests pass.
-The fresh-clone build/verification and both empty-cache reconstruction rounds
-passed component checks. Byte reproducibility failed: ext4/verity/authority
-differed between rounds, and the separate clone also differed in its root tar.
-The causes identified so far are unsorted root tar members and an unpinned ext4
-directory-hash seed. Explicit archive ordering/stable PAX names and a fixed
-public filesystem seed with eager initialization now pass build verification.
-The updated two-round clean reproducibility comparison is running; its outcome
-is not yet known.
+The fresh-clone build/verification passed, and `just reproduce --yes` completed
+two empty-cache download/build/verification rounds with **byte-identical
+payloads** (kernel, initramfs, root tar, ext4, verity tree, authority). The
+earlier failures from unsorted tar members and an unpinned ext4 directory-hash
+seed are fixed. Scope limits (single host/Python, preserved Docker content
+cache, OS payloads only) are recorded with the result.
 Results are recorded in [build-system validation](validation/build-system.md)
 and [root validation](validation/appliance-root.md); no unrun clean-build or
 byte-reproducibility result is implied by the implementation list above.
 
 ## Next gates
 
-1. Finish the clean-download/build/check comparison for the maintained interface.
+1. Produce the preliminary package inventory/CycloneDX SBOM from the locked closure.
 2. Assemble slot-specific authority/UKI inputs and qualify the signed boot path,
    actual systemd/udev scheduling and failure behavior.
 3. Implement the pinned source-built firmware path and qualify firmware trust,
