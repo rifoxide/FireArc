@@ -61,11 +61,11 @@ of the following hold — the 2026-10-21 run satisfied each:
 
 ## Open items (honest)
 
-- **Boot-time enforcement is not proven here.** Whether the payload accepts
-  the constructed store, keeps our hierarchy (rather than re-enrolling its
-  defaults), and actually verifies images is the subject of the step-3d
-  proofs: `SecureBoot=1` on the serial console, signed-chain boot, and
-  unsigned/wrong-key rejection.
+- ~~Boot-time enforcement is not proven here.~~ **Proven in step 3d**
+  (`docs/validation/secure-boot-enforcement.md`): signed-chain boot with
+  `SecureBoot=1` evidenced on serial, content-tamper refusal of UKI and
+  loader, store survival, write confinement. Still open there: cold-start
+  persistence and unauthorized variable-update refusal.
 - **dbx policy is not set** (plan Phase 2 item 12 remains partially open):
   the constructed store carries no revocations.
 - The offline-written entries carry `PubKeyIndex 0` and `.auth`-derived

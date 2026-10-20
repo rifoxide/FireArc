@@ -111,6 +111,11 @@ device *options:
 check-boot *options:
     python3 -B scripts/firearc.py check-boot "$@"
 
+# Prove Secure Boot enforcement on the enrolled firmware: signed chain boots,
+# tampered / modified / loader-tampered variants are refused, the store survives.
+check-secure-boot *options:
+    python3 -B scripts/firearc.py check-secure-boot "$@"
+
 build *options:
     python3 -B scripts/firearc.py build "$@"
 

@@ -38,8 +38,7 @@ from pathlib import Path
 import hashlib
 import struct
 import uuid
-
-from . import firmware_layout, keys
+from . import device, firmware_layout, keys
 from .integrity import (
     SafetyError, private_directory, read_json, regular_file, sha256, write_json,
 )
@@ -49,6 +48,8 @@ AUTH_VARSTORE_GUID = uuid.UUID("aaf32c78-947b-439a-a180-2e144ec37792")
 GLOBAL_VARIABLE_GUID = uuid.UUID("8be4df61-93ca-11d2-aa0d-00e098032b8c")
 SECURITY_DATABASE_GUID = uuid.UUID("d719b2cb-3d3a-4596-a3bc-dad00e67656f")
 CERT_DB_GUID = uuid.UUID("d9bee56e-75dc-49d9-b4d7-b534210f637a")
+SECURE_BOOT_ENABLE_GUID = uuid.UUID("f0a30bc7-af08-4556-99c4-001009c93a44")
+CERT_SHA256_GUID = uuid.UUID("c1c41626-504c-4092-aca9-41f936934328")
 
 FV_ATTRIBUTES = 0x00000E36  # as the payload initializes it (erase polarity 1)
 FV_HEADER_BYTES = 0x48
@@ -60,13 +61,31 @@ STORE_FORMATTED = 0x5A
 STORE_HEALTHY = 0xFE
 ATTR_NV_BS_RT = 0x7
 ATTR_NV_BS_RT_AT = 0x27
+ATTR_NV_BS = 0x3
+# SecureBoot/SetupMode are runtime-managed: the firmware rewrites them every
+# boot with exactly BS|RT. Storing them with NV makes the boot-time update an
+# attribute-changing write, which the variable driver rejects — the auth
+# variable initialization then aborts and verification sees no usable db.
+ATTR_BS_RT = 0x6
 BLOCK_SIZE = 0x10000
 # The payload sizes the variable store at 64 KiB (PcdVariableStoreSize in
 # UefiPayloadPkg), so the store's Size field is 0xFFB8 inside the larger
 # 256 KiB SMMSTORE region; the remainder stays erased spare space.
 VARSTORE_SIZE = 0x10000
 
-MODE_FLAGS = (("SecureBoot", b"\x01"), ("SetupMode", b"\x00"))
+
+def enable_variable():
+    """SecureBootEnable=1: what this firmware's init derives SecureBoot from.
+
+    The pinned Dasharo AuthVariableLib rewrites SecureBoot at every variable
+    driver initialization: in USER_MODE it sets SecureBoot from the
+    SecureBootEnable UI variable (initializing it to PcdSecureBootDefaultEnable,
+    which is 0 in this build, when absent). Without SecureBootEnable=1 in the
+    store, enforcement is forced off on every boot regardless of the stored
+    SecureBoot value.
+    """
+    return {"name": "SecureBootEnable", "guid": str(SECURE_BOOT_ENABLE_GUID),
+            "attributes": ATTR_NV_BS, "data": b"\x01"}
 
 
 def fv_header(region_size):
@@ -127,6 +146,45 @@ def timestamp_of(auth_path):
         raise SafetyError(f"Authenticated payload {Path(auth_path).name} "
                           f"carries an implausible timestamp")
     return stamp
+
+
+def signed_digest(pe):
+    """The image digest embedded in the artifact's PKCS#7 signature.
+
+    This is authoritative for enrollment: the firmware computes the same
+    digest over the image content and matches it against db hash entries,
+    and sbsign embedded exactly that digest when signing. Extracting it
+    from the signature (rather than recomputing it) cannot diverge from
+    either side — verified against the firmware's own authorization
+    verdicts on 2026-10-21.
+    """
+    rva_offset = struct.unpack_from("<I", pe, 0x3C)[0] + 24 + 112 + 4 * 8
+    rva, size = struct.unpack_from("<II", pe, rva_offset)
+    if not rva or size < 8:
+        raise SafetyError("PE image carries no certificate table")
+    wc_len, wc_rev, wc_type = struct.unpack_from("<IHH", pe, rva)
+    if wc_type != 0x0002:
+        raise SafetyError("PE certificate is not PKCS signed data")
+    pkcs7 = pe[rva + 8:rva + wc_len]
+    algorithm = bytes.fromhex("0609608648016503040201")  # sha256 digest algorithm
+    start = 0
+    while True:
+        at = pkcs7.find(algorithm, start)
+        if at < 0:
+            raise SafetyError("no sha256 digest algorithm in the PKCS#7")
+        pos = at + len(algorithm)
+        if pkcs7[pos:pos + 2] == b"\x05\x00":  # optional NULL parameters
+            pos += 2
+        if pkcs7[pos:pos + 2] == b"\x04\x20":  # 32-byte OCTET STRING digest
+            return pkcs7[pos + 2:pos + 34]
+        start = at + 1
+
+
+def hash_entry(digest, owner_guid):
+    """One EFI_CERT_SHA256 signature-list entry carrying an image digest."""
+    data = uuid.UUID(owner_guid).bytes_le + digest
+    return (CERT_SHA256_GUID.bytes_le
+            + struct.pack("<III", 28 + len(data), 0, len(data)) + data)
 
 
 def parse_store(region):
@@ -207,15 +265,39 @@ def variables(root):
             "data": regular_file(directory, f"{name.lower()}.esl").read_bytes(),
             "timestamp": timestamp_of(regular_file(directory, f"{name.lower()}.auth")),
         })
-    for name, value in MODE_FLAGS:
-        prepared.append({"name": name, "guid": str(GLOBAL_VARIABLE_GUID),
-                         "attributes": ATTR_NV_BS_RT, "data": value})
+    # Order matters only for readability: trust variables first, then the
+    # enforcement-derivation variable, then the mode flags.
+    prepared.extend([enable_variable(),
+                     {"name": "SecureBoot", "guid": str(GLOBAL_VARIABLE_GUID),
+                      "attributes": ATTR_BS_RT, "data": b"\x01"},
+                     {"name": "SetupMode", "guid": str(GLOBAL_VARIABLE_GUID),
+                      "attributes": ATTR_BS_RT, "data": b"\x00"}])
     return prepared
 
 
-def build(root, firmware_label, label):
+def build(root, firmware_label, sign_label, label):
     """Produce the enrolled firmware image from the verified pristine ROM."""
     _, rom, _ = firmware_layout.verified_rom(root, firmware_label)
+    _, sign_output, sign_result = device._stage_outputs(root, sign_label, "sign")
+    if not sign_result.get("signed") or not sign_result.get("signatures_verified"):
+        raise SafetyError("Expected verified signatures to anchor in db")
+    owner = read_json(regular_file(Path(root) / "secrets", "manifest.json"))["owner_guid"]
+    enrolled_variables = variables(root)
+    # This firmware's crypto library (mbedtls BaseCryptLib) implements
+    # AuthenticodeVerify as an unconditional stub, so certificate entries in
+    # db alone cannot authorize images (validated against the firmware's own
+    # debug output and bisected enrollments). The sb certificate is enrolled
+    # for forward compatibility, and enforcement anchors on the authenticode
+    # digests of the exact signed artifacts — the same digests the firmware
+    # itself computes and matches in db.
+    digests = {}
+    for variable in enrolled_variables:
+        if variable["name"] != "db":
+            continue
+        for artifact in (device.UKI_ARTIFACT, "systemd-bootx64.efi"):
+            digest = signed_digest(regular_file(sign_output, artifact).read_bytes())
+            digests[artifact] = digest.hex()
+            variable["data"] += hash_entry(digest, owner)
     image = bytearray(rom.read_bytes())
     fmap = firmware_layout.parse_fmap(bytes(image))
     area = next((item for item in fmap["areas"]
@@ -227,7 +309,6 @@ def build(root, firmware_label, label):
         raise SafetyError("Pristine variable-store region is not fully erased; "
                           "refusing to overwrite existing variables")
 
-    enrolled_variables = variables(root)
     # Deterministic construction: build twice, require byte identity.
     region = construct_region(size, enrolled_variables)
     if region != construct_region(size, enrolled_variables):
@@ -264,6 +345,20 @@ def build(root, firmware_label, label):
                            "data_bytes": len(v["data"])} for v in enrolled_variables],
             "signer_fingerprints": {name: value["sha256_fingerprint"]
                                     for name, value in custody["certificates"].items()},
+            "enforcement": {
+                "db_content": "sb certificate (forward compatibility) plus "
+                              "EFI_CERT_SHA256 entries for the exact signed "
+                              "loader and UKI",
+                "digest_anchors": digests,
+                "firmware_crypto_limitation": "The payload's BaseCryptLibMbedTls "
+                                              "implements AuthenticodeVerify as an "
+                                              "unconditional stub, so certificate "
+                                              "entries cannot authorize images on "
+                                              "this firmware; digests are the "
+                                              "enforcement anchor (validated "
+                                              "2026-10-21 against the firmware's "
+                                              "own verdicts)",
+            },
             "store_format": {"source": "pinned EDK II VariableFormat.h / "
                                        "AuthVariableLib of the firmware build",
                              "fv_header_bytes": FV_HEADER_BYTES,
@@ -282,10 +377,12 @@ def build(root, firmware_label, label):
         write_json(work / "result.json", {
             "passed": True,
             "artifacts": {"enrolled.rom": sha256(output / "enrolled.rom")},
-            "enrolled": ["PK", "KEK", "db", "SecureBoot", "SetupMode"],
+            "enrolled": ["PK", "KEK", "db (certificate + digest anchors)",
+                         "SecureBootEnable", "SecureBoot", "SetupMode"],
             "boot_chain_qualified": False,
-            "scope": "Variable store enrolled; Secure Boot enforcement and "
-                     "rejection behavior not yet proven by a boot",
+            "scope": "Variable store enrolled with development keys and "
+                     "digest anchors; enforcement and rejection behavior "
+                     "are proven by the check-secure-boot gate",
         })
     except Exception as error:
         write_json(work / "result.json", {"passed": False, "error": str(error),

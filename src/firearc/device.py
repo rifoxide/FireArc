@@ -380,6 +380,11 @@ def start_vm(work, name, *, flash, disk, serial, kvm, tpm=None, rebootable=False
              timeout=1800):
     """Start one QEMU machine under QMP control inside an evidence directory."""
     socket_path = work / (name + ".qmp.sock")
+    if len(str(socket_path).encode()) >= 108:
+        # Kernel limit for UNIX socket paths; fail closed with a clear cause
+        # instead of QEMU's cryptic rc=1. Keep session labels short.
+        raise SafetyError(f"QMP socket path too long for a UNIX socket "
+                          f"(>=108 bytes): {socket_path}")
     return VmSession(work, name,
                      qemu_command(flash, disk, serial, kvm=kvm, tpm=tpm,
                                   qmp_socket=socket_path, rebootable=rebootable),

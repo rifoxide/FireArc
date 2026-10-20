@@ -43,22 +43,33 @@ enroll`) builds the entire variable store host-side and splices it into the
 erased SMMSTORE region of the verified firmware-build ROM**, producing
 `enrolled.rom` as a first-class artifact. The store carries the development
 hierarchy's ESLs (PK, KEK in `gEfiGlobalVariableGuid`; db in
-`gEfiImageSecurityDatabaseGuid`), the payload's empty `certdb`, and the two
-mode variables that gate enforcement and update policy — `SecureBoot=1`,
-`SetupMode=0`.
+`gEfiImageSecurityDatabaseGuid`), **SHA-256 digest anchors for the exact
+signed loader and UKI appended to db**, the payload's empty `certdb`, and
+the two mode variables that gate enforcement and update policy —
+`SecureBoot=1`, `SetupMode=0`.
+
+The digest anchors are extracted from each artifact's PKCS#7 signature
+(`enroll.signed_digest`): the digest sbsign embedded is exactly the digest
+the firmware recomputes over the image content and matches against db hash
+entries. Extraction cannot diverge from either side — verified against the
+firmware's own authorization verdicts on 2026-10-21 (a host-recomputed
+digest had drifted from the firmware's on one artifact; the extracted
+digest booted). A pleasant consequence: the anchors are stable across
+re-signings, because authenticode excludes the signature layer.
 
 The stage fails closed on every assumption: the pristine region must be
 fully erased (existing variables are never overwritten), construction must
 be byte-deterministic (double build), the store must re-parse to exactly the
 intended variables, and every byte outside the region, the flash map and the
 image size must be unchanged. Enrollment restages automatically whenever the
-generated hierarchy payloads change (they are stage inputs).
+generated hierarchy payloads or the signed artifacts change (they are stage
+inputs).
 
 This stays honest about what it is not: no boot is executed here, so
-enforcement and rejection behavior are proven separately (step 3d); the
-dbx policy remains open (plan item 12); and the timestamps reuse the
-generated `.auth` payloads, so future guest-side authenticated updates must
-carry later timestamps.
+enforcement and rejection behavior are proven separately (step 3d,
+`docs/validation/secure-boot-enforcement.md`); the dbx policy remains open
+(plan item 12); and the timestamps reuse the generated `.auth` payloads, so
+future guest-side authenticated updates must carry later timestamps.
 
 ## Observed consequence worth recording
 
@@ -68,6 +79,33 @@ copy; ~46 KiB including a 19,976-byte dbx). Those defaults are not our
 trust anchors, and enforcement never ran against them (`SecureBoot` absent
 — which is also why our development-signed artifacts kept booting). The
 enrolled image replaces them wholesale: the store is constructed, not
-patched, so no authorization root we did not install survives. Whether the
-payload's auto-enroller stays dormant when a store already carries a PK is
-a boot-time behavior the step-3d proofs will evidence.
+patched, so no authorization root we did not install survives. The
+step-3d proofs confirmed the auto-enroller stays dormant when a store
+already carries our PK: post-boot stores show the enrolled hierarchy
+intact and no re-enrolled defaults.
+
+## Why digest anchors and not the certificate (root cause, 2026-10-21)
+
+The payload build links `BaseCryptLibMbedTls`, whose
+`CryptAuthenticodeVerify` is an unconditional stub returning FALSE
+(`CryptoPkg/Library/BaseCryptLibMbedTls/Pk/CryptAuthenticode.c` in
+the pinned sources; the payload DSC is `DasharoPayloadPkg/DasharoPayloadPkg.dsc`,
+not `UefiPayloadPkg.dsc`). Certificate entries in db therefore **cannot**
+authorize images on this firmware — proven live: a correctly-signed image
+whose signer certificate sat in db was refused, while SHA-256 digest
+entries in the same db authorized it.
+
+Two consequences recorded honestly:
+
+1. Enforcement on this firmware is **content-integrity anchoring**: db
+   authorizes exact image digests. Any byte-level deviation of loader,
+   UKI sections (kernel, initrd, cmdline) or any other content changes
+   the digest and is refused — evidenced by the step-3d refusals.
+2. Because authenticode excludes the signature layer, **an unsigned
+   rebuild with byte-identical content is indistinguishable from the
+   signed artifact**, and provenance-style proofs ("wrong key", "valid
+   signature of an untrusted signer") are not expressible — any signature
+   layer over identical content passes, including none. The real fix —
+   selecting the openssl `BaseCryptLib` in our own firmware build — is
+   deferred to the firmware/vboot phase (chain step 4) and tracked as a
+   defect of the current pinned payload, not hidden.

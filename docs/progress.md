@@ -155,13 +155,35 @@ qualification. The complete secured appliance is not yet implemented.
   The stage fails closed (erased-region check, byte-deterministic double
   build, re-parse round trip, confinement to SMMSTORE) and restages when
   the generated hierarchy payloads change.
-  Next: prove enforcement on the enrolled image (3d) — `SecureBoot=1`/
-  `SetupMode=0` observed at boot, signed chain still boots, and unsigned/
-  wrong-key UKIs are refused (G2 core evidence).
-- Bounded evidence retention (`just prune`): every successful stage build now
-  prunes superseded evidence directories (keeps current + previous per stage),
-  never touching device-profile-pinned provenance; the first run freed
-  149 GB accumulated by whole-project-digest stage rebuilds.
+- **Secure Boot enforcement proven** (chain step 3d; PLAN Phase 2 item 13
+  and §1.3 annotated; `just check-secure-boot`,
+  [validation](validation/secure-boot-enforcement.md)): four QEMU Q35
+  sessions on the enrolled self-built firmware. The signed chain boots to
+  the verified sysroot with the kernel reporting `secureboot: Secure boot
+  enabled`; a tampered UKI (one `.linux` byte), a modified-content UKI
+  (perturbed `.cmdline`) and a tampered loader are all refused with
+  explicit denial evidence and **no guest code executed**; the enrolled
+  store survives the boot (defaults never re-enrolled) and guest writes
+  stay confined to SMMSTORE. Root cause found and recorded in ADR 0007:
+  the payload links `BaseCryptLibMbedTls` whose `CryptAuthenticodeVerify`
+  is an unconditional stub, so db **certificate** entries authorize
+  nothing while **SHA-256 digest entries** do — enrollment anchors the
+  exact signed loader and UKI digests, extracted from their PKCS#7
+  signatures (`enroll.signed_digest`, authoritative for both sbsign and
+  the firmware). Honest limitation: authenticode excludes the signature
+  layer, so same-content signature changes (including none) are
+  indistinguishable — the proven guarantee is content integrity; the
+  openssl `BaseCryptLib` selection in our own firmware build is deferred
+  to the vboot step. Harness fixes on the way: refusal phrases match
+  whitespace-normalized serial (the console wraps `Acc\r\ness denied`
+  mid-word — this cost three 15-minute timeouts), and QMP socket paths
+  are length-guarded against the 108-byte UNIX limit.
+- Bounded evidence retention tightened (`just prune`): keeps only the
+  state-referenced current generation plus device-profile-pinned
+  provenance (was current + previous), build ids no longer truncate
+  stage names to 15 characters, and the truncated legacy prefixes
+  (`check-secure-bo-`, `firmware-source-`) are resolved so those stages
+  actually prune; ~64 GB more freed on the development host.
 - Development installed-device profile (`just device`): a GPT disk with ESP,
   slot-A root and hash partitions assembled offline from the frozen payloads,
   with systemd-boot taken from the same root archive.

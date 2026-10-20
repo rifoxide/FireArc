@@ -56,6 +56,66 @@ class HeaderTests(unittest.TestCase):
         self.assertEqual(record[66:], b"payload")
 
 
+class DigestTests(unittest.TestCase):
+    def _signed_pe(self, digest=b"\x11" * 32):
+        """A minimal PE whose certificate table embeds a PKCS#7 digest."""
+        cert_body = (bytes.fromhex("0609608648016503040201") + b"\x05\x00"
+                     + b"\x04\x20" + digest)
+        header = bytearray(0x400)
+        header[0:2] = b"MZ"
+        struct.pack_into("<I", header, 0x3C, 0x200)
+        optional = 0x218
+        struct.pack_into("<II", header, optional + 144, 0x400, 8 + len(cert_body))
+        return bytes(header) + struct.pack("<IHH", 8 + len(cert_body), 0x200, 2) + cert_body
+
+    def test_signed_digest_extracts_the_signature_digest(self):
+        digest = bytes(range(32))
+        self.assertEqual(enroll.signed_digest(self._signed_pe(digest)), digest)
+        # The NULL-parameters form is optional.
+        body = (bytes.fromhex("0609608648016503040201") + b"\x04\x20"
+                + bytes(range(32)))
+        header = bytearray(0x400)
+        header[0:2] = b"MZ"
+        struct.pack_into("<I", header, 0x3C, 0x200)
+        struct.pack_into("<II", header, 0x218 + 144, 0x400, 8 + len(body))
+        pe = bytes(header) + struct.pack("<IHH", 8 + len(body), 0x200, 2) + body
+        self.assertEqual(enroll.signed_digest(pe), bytes(range(32)))
+
+    def _alg_free_pe(self):
+        """A signed PE whose certificate lacks the sha256 digest algorithm."""
+        body = b"\x30\x0c\x30\x0a\x06\x08\x2a\x86\x48\x86\xf7\x0d\x02\x05"
+        header = bytearray(0x400)
+        header[0:2] = b"MZ"
+        struct.pack_into("<I", header, 0x3C, 0x200)
+        struct.pack_into("<II", header, 0x218 + 144, 0x400, 8 + len(body))
+        return bytes(header) + struct.pack("<IHH", 8 + len(body), 0x200, 2) + body
+
+    def test_signed_digest_fails_closed(self):
+        # No certificate table: the directory entry is zero.
+        blank = bytearray(0x400)
+        blank[0:2] = b"MZ"
+        self.assertRaises(SafetyError, enroll.signed_digest, bytes(blank))
+        # A certificate that is not PKCS signed data.
+        weird = bytearray(0x400)
+        weird[0:2] = b"MZ"
+        struct.pack_into("<II", weird, 0x218 + 144, 0x200, 16)
+        pe = bytes(weird[:0x200]) + struct.pack("<IHH", 16, 0x200, 9) + b"\x00" * 8
+        self.assertRaises(SafetyError, enroll.signed_digest, pe)
+        # No sha256 digest algorithm anywhere in the certificate.
+        self.assertRaises(SafetyError, enroll.signed_digest,
+                          self._signed_pe()[:0] + self._alg_free_pe())
+
+    def test_hash_entry_layout(self):
+        digest = bytes(range(32))
+        entry = enroll.hash_entry(digest, "fa1ec0de-05ec-4a41-8a41-0000000000a1")
+        self.assertEqual(entry[:16], enroll.CERT_SHA256_GUID.bytes_le)
+        self.assertEqual(struct.unpack_from("<III", entry, 16),
+                         (28 + 16 + 32, 0, 16 + 32))
+        self.assertEqual(entry[28:44], uuid.UUID(
+            "fa1ec0de-05ec-4a41-8a41-0000000000a1").bytes_le)
+        self.assertEqual(entry[44:], digest)
+
+
 class StoreTests(unittest.TestCase):
     def variables(self):
         return [
@@ -131,7 +191,8 @@ class ContentTests(unittest.TestCase):
             prepared = enroll.variables(root)
             by_name = {v["name"]: v for v in prepared}
             self.assertEqual([v["name"] for v in prepared],
-                             ["certdb", "PK", "KEK", "db", "SecureBoot", "SetupMode"])
+                             ["certdb", "PK", "KEK", "db", "SecureBootEnable",
+                              "SecureBoot", "SetupMode"])
             # PK/KEK live in the global-variable GUID; db is a security database.
             self.assertEqual(by_name["PK"]["guid"], str(enroll.GLOBAL_VARIABLE_GUID))
             self.assertEqual(by_name["KEK"]["guid"], str(enroll.GLOBAL_VARIABLE_GUID))
@@ -140,10 +201,17 @@ class ContentTests(unittest.TestCase):
             self.assertEqual(by_name["PK"]["data"], b"esl-pk.esl")
             self.assertEqual(by_name["db"]["data"], b"esl-db.esl")
             self.assertEqual(by_name["PK"]["timestamp"], VALID_TIME)
-            # Mode flags are plain one-byte values.
+            # Mode flags are plain one-byte values; the derivation variable
+            # carries NV|BS exactly as the firmware's init writes it, while
+            # the runtime-managed flags are BS|RT (an NV attribute there
+            # breaks the boot-time rewrite).
             self.assertEqual(by_name["SecureBoot"]["data"], b"\x01")
             self.assertEqual(by_name["SetupMode"]["data"], b"\x00")
-            self.assertEqual(by_name["SecureBoot"]["attributes"], 0x7)
+            self.assertEqual(by_name["SecureBoot"]["attributes"], 0x6)
+            self.assertEqual(by_name["SecureBootEnable"]["data"], b"\x01")
+            self.assertEqual(by_name["SecureBootEnable"]["guid"],
+                             str(enroll.SECURE_BOOT_ENABLE_GUID))
+            self.assertEqual(by_name["SecureBootEnable"]["attributes"], 0x3)
             # certdb mirrors the payload's empty certificate database.
             self.assertEqual(by_name["certdb"]["data"], struct.pack("<I", 4))
 
@@ -156,7 +224,7 @@ class ContentTests(unittest.TestCase):
             self.assertRaises(SafetyError, enroll.variables, root)
 
     def test_stage_wiring(self):
-        self.assertEqual(pipeline.DEPENDENCIES["enroll"], ("firmware-build",))
+        self.assertEqual(pipeline.DEPENDENCIES["enroll"], ("firmware-build", "sign"))
         inputs = pipeline.Pipeline.STAGE_INPUTS["enroll"]
         for name in ("secrets/manifest.json", "secrets/pk.esl", "secrets/kek.esl",
                      "secrets/db.esl", "secrets/pk.auth", "secrets/kek.auth",

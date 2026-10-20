@@ -35,7 +35,10 @@ class FakeQmpServer(threading.Thread):
                 for line in stream:
                     request = json.loads(line)
                     action = self.script.get(request.get("execute"))
-                    if action == "close":
+                    if action == "close" or action is None:
+                        # Scripted end, or an unscripted command: hang up so
+                        # the client fails closed instead of the server
+                        # crashing on None.
                         return
                     for message in action:
                         stream.write(json.dumps(message) + "\n")

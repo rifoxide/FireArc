@@ -77,9 +77,9 @@ The enforced chain — reset to read-only root, nothing unsigned executing:
 | --- | --- |
 | Pinned, reproducible firmware build (host-anchored per ADR 0005) | **done** — three byte-identical builds |
 | vboot protected-RO verification of mutable firmware/payload regions | remaining — investigated and feasible; needs board-layout change + signing keys |
-| Signed slot-specific UKI with the verity authority embedded | **dev-signed done** — sb-signed, verified and content-checked; enforcement pending |
-| FireArc Secure Boot: PK/KEK/db/dbx enrollment, `SecureBoot=1` | **enrollment implemented** (`just enroll`, ADR 0007: PK/KEK/db + SecureBoot/SetupMode constructed offline into SMMSTORE); dbx policy and boot-time enforcement proofs remain |
-| Signed systemd-boot (normal and fallback `BOOTX64.EFI` paths) | **dev-signed done** (ADR 0006 sb key, both ESP paths); enforcement pending enrollment |
+| Signed slot-specific UKI with the verity authority embedded | **dev-signed done** — sb-signed, verified and content-checked; **enforced** (boots under `SecureBoot=1`, content tamper refused) |
+| FireArc Secure Boot: PK/KEK/db/dbx enrollment, `SecureBoot=1` | **implemented and enforced** (`just enroll` + `just check-secure-boot`, ADR 0007: PK/KEK/db + digest anchors + SecureBoot/SetupMode constructed offline into SMMSTORE; the signed chain boots, content tamper refused); dbx policy, cold-start persistence and variable-update refusal remain |
+| Signed systemd-boot (normal and fallback `BOOTX64.EFI` paths) | **dev-signed done and enforced** (ADR 0006 sb key, both ESP paths; tampered loader refused by the firmware) |
 | Initramfs full-root verity preverification | **done**; the authority now rides inside the UKI's .initrd section (signed once the UKI is signed) |
 | Read-only dm-verity root (slot A) | **done**; slot B and switching are update-phase work, deferred |
 
@@ -97,9 +97,23 @@ Critical path, in order:
    sign`, dev sb key only; both artifacts sbverify-verified and
    content-checked). **Enrollment implemented 2026-10-21** (`just enroll`,
    ADR 0007: the variable store is constructed offline into the erased
-   SMMSTORE region — PK/KEK/db + `SecureBoot=1`/`SetupMode=0`; the payload's
-   own gate is the `SecureBoot` variable, which nothing else writes); the
-   boot-time rejection proofs remain.
+   SMMSTORE region — PK/KEK/db + `SecureBoot=1`/`SetupMode=0`; db carries
+   SHA-256 digest anchors for the exact signed loader and UKI, extracted
+   from their PKCS#7 signatures — the payload's crypto library stubs
+   certificate verification, so digest entries are the authorization
+   mechanism this firmware actually enforces). **Enforcement proven
+   2026-10-21** (`just check-secure-boot`,
+   `docs/validation/secure-boot-enforcement.md`): the signed chain boots
+   with the kernel reporting `secureboot: Secure boot enabled`; tampered
+   UKI, modified-content UKI and tampered loader are all refused with
+   explicit denial evidence and no guest code executed; the enrolled
+   store survives the boot (no re-enrolled defaults) and guest writes stay
+   confined to SMMSTORE. Honest limitation: because authenticode excludes
+   the signature layer, same-content signature changes (including no
+   signature) are indistinguishable — the proven guarantees are
+   content-integrity anchored; the openssl `BaseCryptLib` fix in our own
+   firmware build is tracked for the vboot step. Cold-start persistence
+   and unauthorized variable-update refusal remain open (Phase 2 item 13).
 4. **vboot adoption** per the investigation: custom fmd restoring SMMSTORE,
    flash-backed VBNV, futility-signed RW regions, wrong-key/modified RW
    rejection before payload execution (Phase 2 item 6).
@@ -446,7 +460,7 @@ Check only steps supported by project code and recorded validation. A checked do
 10. [ ] Design the PDF's offline-root/HSM/two-person ceremony. Software tokens may rehearse interfaces but cannot satisfy a claim of hardware-backed production custody.
 11. [ ] Generate a new approved development hierarchy outside source/build trees; expose only public certificates to firmware builds and only the required private key to an isolated signing step. Generation done 2026-10-20 (ADR 0006, `just keys`): PK/KEK/image-signing RSA-3072 hierarchy plus `pk.auth`/`kek.auth`/`db.auth` time-based enrollment payloads under gitignored `secrets/` (0700/0600, idempotent, fails closed on partials). The sb-key-only exposure of the isolated signing step is demonstrated with the signing work next.
 12. [ ] Enroll FireArc PK/KEK/db and an explicit dbx policy. Remove unrelated authorization roots only after recovery and rollback implications have been reviewed. Enrollment mechanism implemented 2026-10-21 (`just enroll`, ADR 0007): the dev PK/KEK/db and `SecureBoot=1`/`SetupMode=0` are constructed offline into the erased SMMSTORE region of the firmware ROM (`enrolled.rom`), replacing the payload's auto-enrolled defaults wholesale; format validated against the pinned EDK II sources and real payload-initialized stores (`docs/validation/secure-boot-enrollment.md`). Still open: an explicit dbx policy, removal review for the payload's default authorization roots once enforcement is proven, and boot-time acceptance evidence (step 3d).
-13. [ ] Prove `SecureBoot=1`, `SetupMode=0` and exact trust fingerprints after reboot and cold start. Test that unsigned variable updates and unauthorized key replacement are refused.
+13. [ ] Prove `SecureBoot=1`, `SetupMode=0` and exact trust fingerprints after reboot and cold start. Test that unsigned variable updates and unauthorized key replacement are refused. Enforcement core proven 2026-10-21 (`just check-secure-boot`, `docs/validation/secure-boot-enforcement.md`): the enrolled chain boots with the kernel reporting `secureboot: Secure boot enabled`; tampered UKI, modified-content UKI and tampered loader are refused with no guest code executed; the enrolled store survives the boot with no re-enrolled defaults. Honest scope: enforcement anchors on db digest entries (the payload's crypto stubs certificate verification — ADR 0007), so the proofs establish content integrity, not signer identity. Still open: reboot/cold-start persistence and refusal of unauthorized variable updates.
 14. [ ] Qualify authenticated PK/KEK/db/dbx updates, replay rejection and reset-to-default behavior. Ensure a firmware reset cannot silently restore broad vendor trust as the accepted appliance state.
 15. [ ] Disable EFI shell, network boot, unnecessary option ROMs and ordinary external boot in the release profile; retain a separately controlled recovery route.
 16. [ ] Confirm that source-level SMM/variable-store protection is actually suitable. Presence of `SMMSTORE` alone does not prove authenticated-variable isolation or flash write protection.
