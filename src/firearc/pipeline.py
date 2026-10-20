@@ -14,7 +14,7 @@ import sys
 import tarfile
 import uuid
 
-from . import builder, device, enroll, firmware, firmware_build, firmware_layout, initrd, rootfs, sbom, sign, uki
+from . import builder, device, enroll, firmware, firmware_build, firmware_layout, initrd, rootfs, sbom, secureboot, sign, uki
 from .inputs import validate_locks
 from .integrity import SafetyError, private_directory, read_json, regular_file, sha256, verify_file, write_json
 
@@ -28,8 +28,9 @@ DEPENDENCIES = {
     "firmware-layout": ("firmware-build",),
     "uki": ("tools", "root", "rootfs"),
     "sign": ("tools", "root", "uki"),
-    "enroll": ("firmware-build",),
+    "enroll": ("firmware-build", "sign"),
     "device": ("tools", "rootfs", "sign"), "check-boot": ("tools", "device", "firmware-build"),
+    "check-secure-boot": ("tools", "uki", "sign", "device", "enroll"),
 }
 
 
@@ -99,13 +100,17 @@ def _tree_bytes(path):
     return total
 
 
-def prune(root, *, keep=1):
-    """Delete superseded stage evidence: keep the current dir plus `keep` previous.
+def prune(root, *, keep=0):
+    """Delete superseded stage evidence: keep the current dirs plus `keep` previous.
 
-    Current directories are exactly the ids in build/state.json. Device
-    profiles pin their provenance to older evidence directories (disk and
-    firmware labels); those stay untouched. Deleting uses the same mapped-UID
-    cleanup as `clean` because container-built files may not be user-owned.
+    The default keeps only what the build still references: the current
+    directories are exactly the ids in build/state.json, and device profiles
+    pin their provenance to older evidence directories (disk and firmware
+    labels); those stay untouched. Everything else — superseded generations
+    and debris from failed or interrupted runs — is deleted immediately, so
+    evidence for a stage costs disk only while it is the active generation.
+    Deleting uses the same mapped-UID cleanup as `clean` because
+    container-built files may not be user-owned.
     """
     build = Path(root) / "build"
     if not build.is_dir():
@@ -127,17 +132,25 @@ def prune(root, *, keep=1):
     families = [build / "images", build / "firmware", build / "firmware-build",
                 build / "firmware-layout", builder.parent(root)]
     stage_names = set(DEPENDENCIES)
+    # Older build ids truncated the stage name to 15 characters
+    # ("check-secure-boot" -> "check-secure-bo"); resolve both spellings so
+    # every stage generation is prunable, whatever its directory prefix.
+    prefixes = {}
+    for name in stage_names:
+        prefixes[name] = name
+        prefixes[name[:15]] = name
     by_stage = {}
     for family in families:
         if not family.is_dir():
             continue
         for entry in sorted(family.iterdir()):
             match = STAGE_DIR_PATTERN.match(entry.name)
-            if not match or match.group("stage") not in stage_names:
+            if not match or match.group("stage") not in prefixes:
                 continue
             if entry.name in protected or not entry.is_dir():
                 continue
-            by_stage.setdefault((family.name, match.group("stage")), []).append(entry)
+            by_stage.setdefault((family.name, prefixes[match.group("stage")]),
+                                []).append(entry)
     removed, kept = [], []
     for (_, stage), entries in sorted(by_stage.items()):
         ordered = sorted(entries, key=lambda path: path.stat().st_mtime, reverse=True)
@@ -235,7 +248,7 @@ class Pipeline:
         if stage.startswith("packages-") or stage == "metadata":
             if not self.online:
                 raise SafetyError("Missing/stale dependencies; run just bootstrap (explicit network acquisition)")
-        build_id = stage[:15] + "-" + uuid.uuid4().hex[:12]
+        build_id = stage + "-" + uuid.uuid4().hex[:12]
         print(f"Building {stage}…", file=sys.stderr, flush=True)
         work, extra = self.produce(stage, build_id, dependencies)
         files = {}
@@ -290,11 +303,16 @@ class Pipeline:
             sign.build(root, deps["tools"]["id"], deps["root"]["id"], deps["uki"]["id"], build_id)
             return self.build / "images" / build_id, {}
         if stage == "enroll":
-            enroll.build(root, deps["firmware-build"]["id"], build_id)
+            enroll.build(root, deps["firmware-build"]["id"], deps["sign"]["id"], build_id)
             return self.build / "images" / build_id, {}
         if stage == "device":
             device.assemble(root, deps["tools"]["id"], deps["rootfs"]["id"],
                             deps["sign"]["id"], build_id)
+            return self.build / "images" / build_id, {}
+        if stage == "check-secure-boot":
+            secureboot.check_secure_boot(root, deps["tools"]["id"], deps["uki"]["id"],
+                                         deps["sign"]["id"], deps["device"]["id"],
+                                         deps["enroll"]["id"], build_id)
             return self.build / "images" / build_id, {}
         if stage == "check-boot":
             device.check_boot(root, deps["tools"]["id"], deps["device"]["id"],
@@ -394,6 +412,7 @@ def run(root, command, *, online=False):
         elif command == "sign": pipeline.ensure("sign")
         elif command == "enroll": pipeline.ensure("enroll")
         elif command == "device": pipeline.ensure("device")
+        elif command == "check-secure-boot": pipeline.ensure("check-secure-boot")
         elif command == "check-boot": pipeline.ensure("check-boot")
         elif command == "check-initrd": pipeline.ensure("check-initrd")
         elif command == "check-rootfs": pipeline.ensure("check-rootfs")

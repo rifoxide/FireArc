@@ -39,6 +39,20 @@ def fabricate(root):
 
 
 class PruneTests(unittest.TestCase):
+    def test_prune_default_keeps_only_referenced_evidence(self):
+        with temporary() as root:
+            fabricate(root)
+            result = pipeline.prune(root)
+            removed = [item["dir"] for item in result["removed"]]
+            # Default retention: only the state-pinned current generation (and
+            # anything a device profile pins) survives; superseded generations
+            # and failed-run debris go away immediately.
+            self.assertEqual(sorted(removed),
+                             ["device-aaaaaaaaaaaa", "device-bbbbbbbbbbbb",
+                              "rootfs-aaaaaaaaaaaa"])
+            self.assertTrue((root / "build/images/device-cccccccccccc").is_dir())
+            self.assertTrue((root / "build/images/rootfs-bbbbbbbbbbbb").is_dir())
+
     def test_prune_keeps_current_and_previous_generation(self):
         with temporary() as root:
             fabricate(root)
@@ -51,6 +65,26 @@ class PruneTests(unittest.TestCase):
             self.assertIn("rootfs-aaaaaaaaaaaa", result["kept"])
             self.assertTrue((root / "build/images/device-cccccccccccc").is_dir())
             self.assertTrue((root / "build/images/rootfs-bbbbbbbbbbbb").is_dir())
+
+    def test_prune_resolves_truncated_legacy_stage_prefixes(self):
+        with temporary() as root:
+            build = root / "build"
+            build.mkdir(mode=0o700)
+            images = build / "images"
+            images.mkdir(mode=0o700)
+            for name in ("check-secure-bo-aaaaaaaaaaaa",   # truncated legacy prefix
+                         "check-secure-boot-bbbbbbbbbbbb",  # full name
+                         "firmware-source-cccccccccccc"):   # truncated legacy prefix
+                (images / name).mkdir(mode=0o700)
+            write_json(root / "build/state.json",
+                       {"schema": 1, "stages": {}})
+            result = pipeline.prune(root)
+            # Unprotected generations under either spelling go away; only
+            # state-pinned or profile-pinned dirs survive.
+            removed = sorted(item["dir"] for item in result["removed"])
+            self.assertEqual(removed, ["check-secure-bo-aaaaaaaaaaaa",
+                                       "check-secure-boot-bbbbbbbbbbbb",
+                                       "firmware-source-cccccccccccc"])
 
     def test_prune_protects_profile_pinned_evidence(self):
         with temporary() as root:

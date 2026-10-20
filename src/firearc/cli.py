@@ -21,7 +21,7 @@ def main():
         commands.add_parser(name)
     keys_command = commands.add_parser(
         "keys", help="Generate (once) the development signing hierarchy under secrets/")
-    for name in ("bootstrap", "build-tools", "build-root", "build-rootfs", "build", "sbom", "firmware-sources", "firmware-build", "firmware-layout", "uki", "sign", "enroll", "device", "check-boot", "check-initrd", "check-rootfs", "verify-build"):
+    for name in ("bootstrap", "build-tools", "build-root", "build-rootfs", "build", "sbom", "firmware-sources", "firmware-build", "firmware-layout", "uki", "sign", "enroll", "device", "check-boot", "check-secure-boot", "check-initrd", "check-rootfs", "verify-build"):
         command = commands.add_parser(name)
         command.add_argument("--online", action="store_true", help="Allow pinned dependency downloads")
     for name in ("clean", "reproduce"):
@@ -57,8 +57,8 @@ def main():
     restore.add_argument("--name", required=True)
     restore.add_argument("--label", required=True)
     prune = commands.add_parser("prune",
-                                help="Delete superseded stage evidence (keeps current + previous)")
-    prune.add_argument("--keep", type=int, default=1,
+                                help="Delete superseded stage evidence (keeps only current)")
+    prune.add_argument("--keep", type=int, default=0,
                        help="How many superseded evidence directories to keep per stage")
     args = parser.parse_args()
     try:
