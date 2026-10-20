@@ -267,9 +267,24 @@ class HarnessWiringTests(unittest.TestCase):
         self.assertIn("tcg", device.qemu_command("/f", "/d", "/s", kvm=False))
         self.assertNotIn("kvm", " ".join(device.qemu_command("/f", "/d", "/s", kvm=False)))
 
-    def test_dev_unit_graces_before_poweroff(self):
-        self.assertIn(f"sleep {device.GRACE_SECONDS}", device.DEV_UNIT)
-        self.assertIn("poweroff -f", device.DEV_UNIT)
+    def test_dev_unit_holds_initrd_for_runtime_verity_read(self):
+        self.assertIn(f"sleep {device.RUNTIME_READ_SETTLE_SECONDS}", device.DEV_UNIT)
+        # The known systemd ExecStart pitfall: backslash escapes break quoting.
+        self.assertNotIn("\\", device.DEV_UNIT)
+        self.assertIn("Before=initrd.target", device.DEV_UNIT)
+        self.assertIn(device.RUNTIME_EIO_MARKER, device.DEV_UNIT)
+        self.assertIn(device.RUNTIME_CLEAN_MARKER, device.DEV_UNIT)
+        # Sessions are ended by the harness; the unit carries no poweroff.
+        self.assertNotIn("poweroff", device.DEV_UNIT)
+
+    def test_dev_cpio_blocks_switch_root_behind_the_dev_unit(self):
+        from test_device import AUTHORITY, parse_cpio
+        entries = parse_cpio(device.dev_cpio(AUTHORITY))
+        self.assertIn("etc/systemd/system/initrd.target.requires", entries)
+        link = entries["etc/systemd/system/initrd.target.requires/firearc-dev-done.service"]
+        self.assertEqual(link, (0o120777, b"../firearc-dev-done.service"))
+        self.assertNotIn("etc/systemd/system/initrd.target.wants/firearc-dev-done.service",
+                         entries)
 
     def test_dev_unit_reports_tis_acpi_binding(self):
         self.assertIn("FIREARC_TPM_TIS_OK", device.DEV_UNIT)

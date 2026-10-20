@@ -51,11 +51,14 @@ PARTITIONS = (
 KERNEL_CMDLINE = ("root=/dev/mapper/firearc-root rootfstype=ext4 rootflags=ro,noload ro "
                   "rauc.slot=A rd.shell=0 rd.emergency=poweroff console=ttyS0,115200")
 
-# The dev unit waits out this many seconds after its markers before powering
-# off. This fallback is best-effort only: the unit runs in the initrd, and
-# switch_root's cleanup stops it first, so in practice every session is ended
-# by the harness over QMP (orderly quit, powerdown request or hard kill).
-GRACE_SECONDS = 25
+# After its markers the unit waits this many seconds — the harness's window
+# to corrupt the disk mid-session for the runtime verity test — then drops
+# caches and re-reads the whole verity device, printing whether dm-verity
+# returned an I/O error. Afterwards it idles bounded: every session is ended
+# by the harness over QMP (PDEATHSIG covers orphans), so the unit carries no
+# poweroff of its own.
+RUNTIME_READ_SETTLE_SECONDS = 6
+UNIT_TAIL_IDLE_SECONDS = 600
 
 # Sustained serial silence for this long suggests the payload is parked at
 # its interactive boot menu; send a recorded ENTER nudge, at most this many
@@ -75,6 +78,7 @@ Description=FireArc development boot smoke terminal
 DefaultDependencies=no
 Requires=sysroot.mount
 After=sysroot.mount
+Before=initrd.target
 
 [Service]
 Type=oneshot
@@ -87,13 +91,15 @@ StandardError=journal+console
 # The TPM marker reports whether the kernel's built-in tpm_tis driver bound a
 # TPM 2.0 device through ACPI (QEMU's tpm-tis presents the MSFT0101 device; the
 # chip lands at /sys/class/tpm/tpm0 with tpm_version_major=2 and /dev/tpm0);
-# without a TPM attached the profile boot gate expects the explicit miss line. The debug lines are dev-harness
-# diagnostics only. After the markers the unit stays up in a bounded grace
-# window (GRACE_SECONDS) so harness operations — QMP reset/powerdown or a
-# power cut — act on a running machine; only then does it fall back to the
-# immediate poweroff syscall (a systemd shutdown job once raced switch_root
-# to the real root in observed runs).
-ExecStart=/bin/sh -c 'echo FIREARC_TPM_DEBUG_CLASS=$(ls /sys/class 2>/dev/null | grep -i tpm); echo FIREARC_TPM_DEBUG_TPM0=$(ls /sys/class/tpm/tpm0 2>&1); echo FIREARC_TPM_DEBUG_VERSION=$(cat /sys/class/tpm/tpm0/tpm_version_major 2>&1); echo FIREARC_TPM_DEBUG_DEV=$(ls /dev/tpm0 /dev/tpmrm0 2>&1); if [ -c /dev/tpm0 ] && [ -d /sys/class/tpm/tpm0 ] && [ "$(cat /sys/class/tpm/tpm0/tpm_version_major 2>/dev/null)" = "2" ]; then echo FIREARC_TPM_TIS_OK > /dev/console; else echo FIREARC_TPM_TIS_MISSING > /dev/console; fi; if grep -Eq " /sysroot ext4 ro(,| )" /proc/mounts; then echo FIREARC_DEV_BOOT_OK > /dev/console; echo FIREARC_DEV_BOOT_OK > /dev/console; else echo FIREARC_DEV_BOOT_MISSING > /dev/console; fi; sleep 25; /usr/bin/poweroff -f || /usr/bin/systemctl --no-block --force poweroff'
+# without a TPM attached the profile boot gate expects the explicit miss line.
+# The debug lines are dev-harness diagnostics only. Blocking initrd.target
+# (Before= plus the requires symlink) keeps the machine in the initrd for the
+# runtime verity read: after a bounded settle window the unit drops caches and
+# re-reads the whole verity-mapped root, reporting an I/O error (corruption
+# caught after mapping) or a clean read. It then idles; the harness, not the
+# guest, ends every session. The read uses cat (coreutils): dd is not part
+# of the minimal dracut initramfs, and the shell captures cat's stderr only.
+ExecStart=/bin/sh -c 'echo FIREARC_TPM_DEBUG_CLASS=$(ls /sys/class 2>/dev/null | grep -i tpm); echo FIREARC_TPM_DEBUG_TPM0=$(ls /sys/class/tpm/tpm0 2>&1); echo FIREARC_TPM_DEBUG_VERSION=$(cat /sys/class/tpm/tpm0/tpm_version_major 2>&1); echo FIREARC_TPM_DEBUG_DEV=$(ls /dev/tpm0 /dev/tpmrm0 2>&1); if [ -c /dev/tpm0 ] && [ -d /sys/class/tpm/tpm0 ] && [ "$(cat /sys/class/tpm/tpm0/tpm_version_major 2>/dev/null)" = "2" ]; then echo FIREARC_TPM_TIS_OK > /dev/console; else echo FIREARC_TPM_TIS_MISSING > /dev/console; fi; if grep -Eq " /sysroot ext4 ro(,| )" /proc/mounts; then echo FIREARC_DEV_BOOT_OK > /dev/console; echo FIREARC_DEV_BOOT_OK > /dev/console; else echo FIREARC_DEV_BOOT_MISSING > /dev/console; fi; sleep 6; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null; rterr=$(cat /dev/mapper/firearc-root 2>&1 > /dev/null); case "$rterr" in *"Input/output error"*) echo FIREARC_RUNTIME_CORRUPT_EIO > /dev/console;; *) echo FIREARC_RUNTIME_READ_CLEAN > /dev/console;; esac; sleep 600'
 """
 
 LOADER_CONF = "timeout 0\ndefault firearc-a\neditor no\n"
@@ -116,6 +122,11 @@ DENIAL_MARKER = re.compile(r"Verification failed at position [0-9]+\.")
 # swtpm tpm-tis device must bind through ACPI without any initrd support.
 TPM_TIS_MARKER = "FIREARC_TPM_TIS_OK"
 TPM_TIS_MISSING_MARKER = "FIREARC_TPM_TIS_MISSING"
+# Runtime verity gate: after full preverification and mapping, the dev unit
+# drops caches and re-reads the whole verity device. A mid-session disk
+# corruption must surface as a dm-verity I/O error, never as read-through.
+RUNTIME_EIO_MARKER = "FIREARC_RUNTIME_CORRUPT_EIO"
+RUNTIME_CLEAN_MARKER = "FIREARC_RUNTIME_READ_CLEAN"
 
 
 def cpio_archive(entries):
@@ -154,9 +165,12 @@ def dev_cpio(authority):
         ("etc/systemd", 0o040755, b""),
         ("etc/systemd/system", 0o040755, b""),
         ("etc/systemd/system/firearc-dev-done.service", 0o0100644, DEV_UNIT.encode()),
-        ("etc/systemd/system/initrd.target.wants", 0o040755, b""),
-        ("etc/systemd/system/initrd.target.wants/firearc-dev-done.service", 0o0120777,
-         b"../firearc-dev-done.service"),
+        # requires (not wants): initrd.target — and therefore switch_root —
+        # waits for the dev unit, keeping the machine in the initrd for the
+        # runtime verity read.
+        ("etc/systemd/system/initrd.target.requires", 0o040755, b""),
+        ("etc/systemd/system/initrd.target.requires/firearc-dev-done.service",
+         0o0120777, b"../firearc-dev-done.service"),
     ])
 
 
@@ -525,12 +539,20 @@ def check_boot(root, tools_label, device_label, firmware_label, label):
     try:
         runs = {}
         flash_runs = {}
-        for name, corrupt in (("good", False), ("corrupt", True)):
+        # Three corruption disciplines on the same disk and firmware:
+        #   good            — clean boot to the verified read-only sysroot,
+        #                     plus a clean full runtime re-read of the mapping
+        #   corrupt         — root byte flipped before boot: full preverification
+        #                     must deny at exactly that offset
+        #   runtime-corrupt — root byte flipped mid-session AFTER preverification
+        #                     and mapping: the dev unit's cached-dropped re-read
+        #                     must hit dm-verity's I/O error, never read through
+        for name in ("good", "corrupt", "runtime-corrupt"):
             target = work / ("device-" + name + ".raw")
             # Private copies: QEMU opens the disk and the firmware flash
             # read-write, so stage artifacts must never be guest-writable.
             shutil.copyfile(disk, target)
-            if corrupt:
+            if name == "corrupt":
                 rootfs.flip_byte(target, ROOT_OFFSET + rootfs.ROOT_BYTES // 2)
             flash = work / ("flash-" + name + ".rom")
             shutil.copyfile(rom, flash)
@@ -540,31 +562,58 @@ def check_boot(root, tools_label, device_label, firmware_label, label):
             session = start_vm(work, "qemu-boot-" + name, flash=flash, disk=target,
                                serial=serial, kvm=kvm, timeout=1800)
             try:
-                session.wait_until(lambda text: REQUIRED_MARKER in text
-                                   or DENIAL_MARKER.search(text))
+                if name == "runtime-corrupt":
+                    session.wait_until(lambda text: REQUIRED_MARKER in text)
+                    # The mapping is up and preverification passed; corrupt the
+                    # underlying disk under the running machine.
+                    rootfs.flip_byte(target, ROOT_OFFSET + rootfs.ROOT_BYTES // 2)
+                    session.wait_until(lambda text: RUNTIME_EIO_MARKER in text
+                                       or RUNTIME_CLEAN_MARKER in text)
+                elif name == "good":
+                    session.wait_until(
+                        lambda text: (REQUIRED_MARKER in text
+                                      and (RUNTIME_CLEAN_MARKER in text
+                                           or RUNTIME_EIO_MARKER in text))
+                        or bool(DENIAL_MARKER.search(text)))
+                else:
+                    session.wait_until(lambda text: REQUIRED_MARKER in text
+                                       or bool(DENIAL_MARKER.search(text)))
                 session.quit()  # no-op if the machine already left on its own
             finally:
                 session.close()
-            markers, denial = boot_verdict(serial.read_text(errors="replace"))
+            text = serial.read_text(errors="replace")
+            markers, denial = boot_verdict(text)
+            runtime = {"io_error": RUNTIME_EIO_MARKER in text,
+                       "read_clean": RUNTIME_CLEAN_MARKER in text}
             # Guest firmware writes must land only in the declared variable
             # store; every code, flash-map, preserved and unmapped byte of the
             # booted flash copy must match the pristine image.
             flash_runs[name] = firmware_layout.write_confinement(
                 pristine, flash.read_bytes(), layout)
             runs[name] = {"markers": markers, "denial": denial, "exited": True,
+                          "runtime_verdict": runtime,
                           "menu_unstick_keypresses": session.keypresses}
-            if corrupt:
+            if name == "corrupt":
                 if any(markers.values()) or not denial["denial"]:
                     raise SafetyError("Corrupted root was accepted or produced no verity denial")
-            elif not markers[REQUIRED_MARKER] or denial["denial"]:
-                raise SafetyError("Uncorrupted development boot did not reach the verified "
-                                  "read-only sysroot terminal marker")
+            elif name == "runtime-corrupt":
+                if not markers[REQUIRED_MARKER] or denial["denial"] \
+                        or runtime["read_clean"] or not runtime["io_error"]:
+                    raise SafetyError("Post-mapping corruption was not denied at "
+                                      "runtime: dm-verity read through or returned "
+                                      "no I/O error")
+            elif not markers[REQUIRED_MARKER] or denial["denial"] \
+                    or not runtime["read_clean"]:
+                raise SafetyError("Uncorrupted development boot did not reach the "
+                                  "verified read-only sysroot terminal marker with "
+                                  "a clean runtime read")
         for name, digest in device_result["artifacts"].items():
             verify_file(regular_file(device_output, name), digest)
         builder.verify_tools(root, tools_label)
         write_json(work / "result.json", {
             "passed": True, "kvm": kvm,
             "positive_boot": runs["good"], "corruption_control": runs["corrupt"],
+            "runtime_corruption_control": runs["runtime-corrupt"],
             "firmware": {"rom_sha256": sha256(rom),
                          "sdk_image": firmware_manifest.get("sdk_image"),
                          "sources": len(firmware_manifest.get("sources", {})),

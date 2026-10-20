@@ -55,9 +55,13 @@ class DeviceTests(unittest.TestCase):
         self.assertEqual(authority[1].decode(), rootfs.render_initrd_authority(AUTHORITY, "A"))
         unit = entries["etc/systemd/system/firearc-dev-done.service"][1].decode()
         self.assertIn("Requires=sysroot.mount", unit)
-        self.assertIn("--force poweroff", unit)
+        self.assertIn("Before=initrd.target", unit)
+        self.assertIn("FIREARC_RUNTIME_CORRUPT_EIO", unit)
+        self.assertNotIn("poweroff", unit)
         self.assertNotIn("\nEnvironment=", unit)
-        link = entries["etc/systemd/system/initrd.target.wants/firearc-dev-done.service"]
+        # requires (not wants): switch_root waits for the dev unit so the
+        # runtime verity read actually happens before the real root.
+        link = entries["etc/systemd/system/initrd.target.requires/firearc-dev-done.service"]
         self.assertEqual(link[0], 0o120777)
         self.assertEqual(link[1], b"../firearc-dev-done.service")
         self.assertEqual(entries["etc"][0], 0o40755)

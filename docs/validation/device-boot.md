@@ -24,10 +24,17 @@ differ from the pristine ROM only inside the SMMSTORE variable region
   kernel, and the initramfs extended by a deterministic development cpio
   segment (4-byte-aligned per the kernel's concatenated-initramfs rules).
 - The development cpio carries the slot-A verity authority rendered by the
-  strict text contract and an explicit development-only poweroff unit that
-  independently re-checks `/proc/mounts` for the read-only verified sysroot
-  before writing the terminal marker directly to the console device. It is
-  never part of the signed pipeline.
+  strict text contract and a development-only terminal unit that independently
+  re-checks `/proc/mounts` for the read-only verified sysroot before writing
+  the terminal marker directly to the console device. The unit is wired into
+  `initrd.target.requires` with `Before=initrd.target`, so switch_root waits
+  for it: after its markers it waits out a bounded settle window (the
+  harness's mid-session corruption window), drops caches and re-reads the
+  whole verity-mapped root with cat (dd is not in the minimal dracut
+  initramfs), reporting `FIREARC_RUNTIME_READ_CLEAN` or
+  `FIREARC_RUNTIME_CORRUPT_EIO`. It then idles — every session is ended by
+  the harness over the local QMP socket. It is never part of the signed
+  pipeline.
 - Firmware: the monolithic 8 MiB coreboot ROM (Dasharo Q35 UEFI variant at the
   pinned commits, compiled offline in the pinned SDK container) is booted as a
   single writable pflash copy per run; its SMMSTORE FMAP region carries the
@@ -38,16 +45,29 @@ differ from the pristine ROM only inside the SMMSTORE variable region
 ## Result (2026-10-20)
 
 `just check-boot` passed on QEMU Q35 with KVM, both under the previous host
-OVMF fixture and with the self-built coreboot/EDK II firmware. Positive boot:
-full 4 GiB verity preverification, dm-verity mapping, read-only ext4 sysroot
-mount and the self-verified terminal marker, followed by clean poweroff.
-Corruption control: one flipped bit at the root-partition midpoint produced
-`Verification failed at position 2147483648` — exactly the flip offset — no
-mapping, no mount and no terminal marker, followed by failure-path poweroff.
-Both runs exited QEMU through poweroff rather than timeout. The dev unit now
-issues the immediate `poweroff -f` syscall: the previous systemd shutdown job
-once raced `switch_root` into the real root's login prompt (found and fixed
-while qualifying the persistent device profile).
+OVMF fixture and with the self-built coreboot/EDK II firmware. Three
+corruption disciplines on the same disk and firmware:
+
+- **Positive boot:** full 4 GiB verity preverification, dm-verity mapping,
+  read-only ext4 sysroot mount, the self-verified terminal marker, and —
+  after dropping caches — a clean full re-read of the verity device
+  (`FIREARC_RUNTIME_READ_CLEAN`).
+- **Preverification corruption control:** one flipped bit at the
+  root-partition midpoint produced `Verification failed at position
+  2147483648` — exactly the flip offset — no mapping, no mount and no
+  terminal marker.
+- **Runtime corruption control:** the same flip is applied by the harness
+  mid-session, after preverification passed and the mapping was up. The dev
+  unit's cached-dropped full re-read then hit dm-verity's I/O error
+  (`FIREARC_RUNTIME_CORRUPT_EIO`): corrupted data was never read through,
+  and writes stayed confined to SMMSTORE in this run as well.
+
+All sessions were ended by the harness over QMP (orderly quit after the
+verdict; the corrupt run leaves by itself through the initrd emergency
+path). The dev unit no longer powers off on its own: it runs in the initrd
+and switch_root's cleanup used to kill its fallback `poweroff -f` (the
+shutdown race documented earlier); orphaned QEMU/swtpm now die with the
+harness process instead.
 
 Flash write confinement (same runs): both boots initialized the SMMSTORE
 variable store (33,586 bytes across the first 10 blocks) and left every byte

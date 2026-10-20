@@ -67,6 +67,16 @@ qualification. The complete secured appliance is not yet implemented.
   cold boot), persistent monolithic flash carries across cold starts and
   warm-reset loops (PLAN 1.12), and no session ever has a network device
   (`-net none`, PLAN 1.15).
+- Post-mapping runtime corruption gate (PLAN Phase 3 item 12 complete): the dev
+  unit now blocks `initrd.target` (requires + Before), so after the verified
+  markers it can drop caches and re-read the whole verity-mapped root while
+  the machine is still up; `check-boot` gained a third discipline that flips
+  a root byte mid-session after the mapping is up — dm-verity returned an
+  I/O error (`FIREARC_RUNTIME_CORRUPT_EIO`) while the uncorrupted control
+  read clean. Found and fixed while qualifying: `dd` is absent from the
+  minimal dracut initramfs (the read uses coreutils cat), and the unit's old
+  guest-side poweroff was dead code anyway (switch_root stops the unit
+  before it runs).
 - Bounded evidence retention (`just prune`): every successful stage build now
   prunes superseded evidence directories (keeps current + previous per stage),
   never touching device-profile-pinned provenance; the first run freed
