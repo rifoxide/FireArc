@@ -13,7 +13,7 @@ import sys
 import tarfile
 import uuid
 
-from . import builder, device, firmware, firmware_build, initrd, rootfs, sbom
+from . import builder, device, firmware, firmware_build, firmware_layout, initrd, rootfs, sbom
 from .inputs import validate_locks
 from .integrity import SafetyError, private_directory, read_json, regular_file, sha256, verify_file, write_json
 
@@ -24,6 +24,7 @@ DEPENDENCIES = {
     "check-rootfs": ("tools", "rootfs"), "sbom": ("packages-root",),
     "firmware-sources": (),
     "firmware-build": ("firmware-sources",),
+    "firmware-layout": ("firmware-build",),
     "device": ("tools", "root", "rootfs"), "check-boot": ("tools", "device", "firmware-build"),
 }
 
@@ -116,6 +117,7 @@ class Pipeline:
         "firmware-sources": ["locks/firmware-sources.json", "src/firearc/firmware.py", "src/firearc/inputs.py"],
         "firmware-build": ["locks/firmware-sources.json", "images/firmware/q35-coreboot.config",
                            "src/firearc/firmware.py", "src/firearc/inputs.py", "src/firearc/firmware_build.py"],
+        "firmware-layout": ["src/firearc/firmware_layout.py"],
     }
 
     def ensure(self, stage):
@@ -186,6 +188,9 @@ class Pipeline:
         if stage == "firmware-build":
             firmware_build.build(root, deps["firmware-sources"]["id"], build_id, allow_network=self.online)
             return self.build / "firmware-build" / build_id, {}
+        if stage == "firmware-layout":
+            firmware_layout.inspect(root, deps["firmware-build"]["id"], build_id)
+            return self.build / "firmware-layout" / build_id, {}
         if stage == "device":
             device.assemble(root, deps["tools"]["id"], deps["root"]["id"], deps["rootfs"]["id"], build_id)
             return self.build / "images" / build_id, {}
@@ -278,6 +283,7 @@ def run(root, command, *, online=False):
         elif command == "sbom": pipeline.ensure("sbom")
         elif command == "firmware-sources": pipeline.ensure("firmware-sources")
         elif command == "firmware-build": pipeline.ensure("firmware-build")
+        elif command == "firmware-layout": pipeline.ensure("firmware-layout")
         elif command == "device": pipeline.ensure("device")
         elif command == "check-boot": pipeline.ensure("check-boot")
         elif command == "check-initrd": pipeline.ensure("check-initrd")

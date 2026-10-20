@@ -9,7 +9,9 @@ asserts the initramfs integrity gate outcome on the serial console. This is the
 development trust domain of the QEMU threat model: it is not Secure Boot, not
 production provisioning, and not a physical-device or release qualification.
 The host OVMF compatibility fixture was replaced by the self-built firmware;
-firmware-verified-boot claims remain open.
+firmware-verified-boot claims remain open. Each booted flash copy must also
+differ from the pristine ROM only inside the SMMSTORE variable region
+([firmware layout](firmware-layout.md)); writes elsewhere fail the stage.
 
 ## Harness construction
 
@@ -43,6 +45,13 @@ Corruption control: one flipped bit at the root-partition midpoint produced
 `Verification failed at position 2147483648` — exactly the flip offset — no
 mapping, no mount and no terminal marker, followed by failure-path poweroff.
 Both runs exited QEMU through poweroff rather than timeout.
+
+Flash write confinement (same runs): both boots initialized the SMMSTORE
+variable store (33,586 bytes across the first 10 blocks) and left every byte
+of the `COREBOOT`, `FMAP` and `BOOTSPLASH` regions identical to the pristine
+ROM; the two runs also produced the same post-boot `SMMSTORE` digest, so the
+first-boot variable initialization was byte-identical. Evidence and limits
+are recorded in [firmware layout](firmware-layout.md).
 
 The stage records the host QEMU digest, the firmware ROM digest with its SDK
 image and source counts, whether KVM was used, and per-marker observations.
@@ -86,7 +95,8 @@ and an offline test refuses any configuration that re-enables unpinned inputs.
 Unsigned development profile (Secure Boot support compiled in but disabled
 without enrollment, development authority segment, deterministic development
 GUIDs, host-rooted QEMU trust). Single machine, no attestation, no A/B slot
-switching, no firmware measurement, no swtpm, no runtime write-attempt or
-reboot-loop coverage. Firmware reproducibility is observed on one host only.
+switching, no firmware measurement, no swtpm, no reboot-loop coverage. Flash
+write confinement records where writes landed in QEMU; it is not hardware
+write protection. Firmware reproducibility is observed on one host only.
 Serial evidence beyond the console-direct marker is best-effort recorded, not
 guaranteed complete.

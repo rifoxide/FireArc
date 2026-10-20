@@ -43,6 +43,10 @@ firmware-sources *options:
 firmware-build *options:
     python3 -B scripts/firearc.py firmware-build "$@"
 
+# Offline flash-map inspection: region roles, gaps, vboot capacity, archival.
+firmware-layout *options:
+    python3 -B scripts/firearc.py firmware-layout "$@"
+
 # Assemble the unsigned development installed-device disk (ESP + slot A).
 device *options:
     python3 -B scripts/firearc.py device "$@"

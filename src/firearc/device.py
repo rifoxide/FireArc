@@ -4,7 +4,9 @@ Assembles an unsigned development disk (GPT ESP + FIREARC_ROOT_A/FIREARC_HASH_A)
 from the frozen OS payloads, boots it under the pinned host QEMU with the
 self-built coreboot/EDK II firmware and asserts the initrd integrity gate
 outcome on the serial console, including a corrupted-root negative control.
-The firmware image is the monolithic 8 MiB ROM from the firmware-build stage;
+Each booted flash copy must also differ from the pristine ROM only inside the
+SMMSTORE variable region: guest firmware writes may never touch code,
+flash-map, preserved or unmapped bytes. The firmware image is the monolithic 8 MiB ROM from the firmware-build stage;
 its SMMSTORE region carries the writable UEFI variable store, so each run
 boots a private writable copy of the ROM. This is a development harness
 profile: it is not Secure Boot, not the production provisioning layout and
@@ -16,7 +18,7 @@ from pathlib import Path
 import re
 import shutil
 
-from . import builder, rootfs
+from . import builder, firmware_layout, rootfs
 from .inputs import load_lock
 from .integrity import (
     SafetyError, identifier, private_directory, read_json, regular_file, sha256,
@@ -298,6 +300,8 @@ def check_boot(root, tools_label, device_label, firmware_label, label):
     if manifest.get("kernel_cmdline") != KERNEL_CMDLINE or not manifest.get("deterministic_development_ids"):
         raise SafetyError("Device manifest does not match the development harness contract")
     firmware_source, rom, firmware_manifest = firmware_rom(root, firmware_label)
+    pristine = rom.read_bytes()
+    layout = firmware_layout.classify(pristine, firmware_layout.parse_fmap(pristine))
     qemu = shutil.which("qemu-system-x86_64")
     pins = load_lock(root, "host-tools")["tools"]["qemu-system-x86_64"]
     if not qemu or sha256(Path(qemu)) != pins["sha256"]:
@@ -307,6 +311,7 @@ def check_boot(root, tools_label, device_label, firmware_label, label):
     work.mkdir(mode=0o700)
     try:
         runs = {}
+        flash_runs = {}
         for name, corrupt in (("good", False), ("corrupt", True)):
             target = work / ("device-" + name + ".raw")
             # Private copies: QEMU opens the disk and the firmware flash
@@ -320,6 +325,11 @@ def check_boot(root, tools_label, device_label, firmware_label, label):
             builder.logged(work, "qemu-boot-" + name, qemu_command(
                 flash, target, serial, kvm=kvm), timeout=1800)
             markers, denial = boot_verdict(serial.read_text(errors="replace"))
+            # Guest firmware writes must land only in the declared variable
+            # store; every code, flash-map, preserved and unmapped byte of the
+            # booted flash copy must match the pristine image.
+            flash_runs[name] = firmware_layout.write_confinement(
+                pristine, flash.read_bytes(), layout)
             runs[name] = {"markers": markers, "denial": denial, "exited": True}
             if corrupt:
                 if any(markers.values()) or not denial["denial"]:
@@ -338,6 +348,11 @@ def check_boot(root, tools_label, device_label, firmware_label, label):
                          "sources": len(firmware_manifest.get("sources", {})),
                          "evidence": firmware_source.name},
             "qemu_sha256": pins["sha256"],
+            "flash_write_confinement": {
+                "permitted_region": firmware_layout.VARIABLE_STORE_AREA,
+                "runs": flash_runs,
+                "scope": "Observed write destinations only; QEMU pflash has no "
+                         "hardware write protection"},
             "qemu_boot_verified": True, "boot_chain_qualified": False,
             "scope": "QEMU Q35 development harness; unsigned dev profile on the self-built "
                      "coreboot/EDK II firmware, not Secure Boot, physical-device or "

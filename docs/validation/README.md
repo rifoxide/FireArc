@@ -5,6 +5,7 @@
 | Public dependency acquisition and clean builds | [Build system](build-system.md) |
 | Root, initramfs and integrity payloads | [Root and initramfs](appliance-root.md) |
 | Development device assembly and QEMU boot gate | [Device boot](device-boot.md) |
+| Firmware flash layout and boot write confinement | [Firmware layout](firmware-layout.md) |
 
 The preliminary CycloneDX inventory (`just sbom`) is generated deterministically
 from the locked root closure; its scope limits are stated in the document
@@ -28,8 +29,11 @@ disabled, pre-seeding the EDK II payload workspace from the verified sources
 so nothing is fetched during the build. It records the exact input commits,
 the SDK image digest, toolchain digests and the CBFS inventory, and
 `just check-boot` boots the ROM (single writable pflash carrying the SMMSTORE
-variable region) instead of any host firmware. Firmware security review,
-byte reproducibility and trust qualification remain open gates; see
+variable region) instead of any host firmware. `just firmware-layout`
+additionally archives the FMAP region inventory with role classification
+([firmware layout](firmware-layout.md)), and the boot gate requires every
+flash byte outside SMMSTORE to survive each run unchanged. Firmware security
+review, byte reproducibility and trust qualification remain open gates; see
 [Device boot](device-boot.md).
 
 Record actual results and limitations against each component's acceptance

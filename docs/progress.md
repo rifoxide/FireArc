@@ -31,6 +31,13 @@ qualification. The complete secured appliance is not yet implemented.
   digests and CBFS inventory. `just check-boot` now boots the self-built
   firmware (writable SMMSTORE pflash, AHCI disk) instead of host OVMF; the
   integrity gate passes and the corruption control still denies.
+- Firmware flash-layout inspection (`just firmware-layout`): the ROM's FMAP is
+  parsed and archived offline with region roles — SMMSTORE variable store,
+  FMAP descriptor, preserved BOOTSPLASH, COREBOOT CBFS code; no gaps and no
+  vboot regions exist in the pinned layout. The boot gate additionally
+  requires every flash byte outside SMMSTORE to survive each run unchanged;
+  both baseline boots confined 33,586 bytes of variable initialization to
+  SMMSTORE (see [firmware-layout validation](validation/firmware-layout.md)).
 - Development installed-device profile (`just device`): a GPT disk with ESP,
   slot-A root and hash partitions assembled offline from the frozen payloads,
   with systemd-boot taken from the same root archive.
@@ -42,7 +49,7 @@ qualification. The complete secured appliance is not yet implemented.
 
 ## Validation
 
-The label-free bootstrap/build/verification pipeline and 93 offline tests pass.
+The label-free bootstrap/build/verification pipeline and 106 offline tests pass.
 The fresh-clone build/verification passed, and `just reproduce --yes` completed
 two empty-cache download/build/verification rounds with **byte-identical
 payloads** (kernel, initramfs, root tar, ext4, verity tree, authority). The
