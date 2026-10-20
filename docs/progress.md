@@ -20,6 +20,9 @@ qualification. The complete secured appliance is not yet implemented.
 - Clean/reproduction commands that rebuild from empty project output directories.
 - Preliminary CycloneDX 1.5 inventory of the locked root closure (`just sbom`),
   with a deterministic serial number derived from the closure fingerprint.
+- Exact-commit acquisition of the pinned upstream firmware repositories
+  (`just firmware-sources --online`), with per-source tree records and offline
+  re-verification. No submodules are fetched and nothing is built or trusted yet.
 
 ## Validation
 

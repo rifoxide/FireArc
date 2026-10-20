@@ -13,7 +13,7 @@ import sys
 import tarfile
 import uuid
 
-from . import builder, initrd, rootfs, sbom
+from . import builder, firmware, initrd, rootfs, sbom
 from .inputs import validate_locks
 from .integrity import SafetyError, private_directory, read_json, regular_file, sha256, verify_file, write_json
 
@@ -22,6 +22,7 @@ DEPENDENCIES = {
     "tools": ("packages-tools",), "root": ("tools", "packages-root"),
     "rootfs": ("tools", "root"), "check-initrd": ("tools", "root"),
     "check-rootfs": ("tools", "rootfs"), "sbom": ("packages-root",),
+    "firmware-sources": (),
 }
 
 
@@ -159,6 +160,9 @@ class Pipeline:
 
     def produce(self, stage, build_id, deps):
         root = self.root
+        if stage == "firmware-sources":
+            firmware.fetch(root, build_id, allow_network=self.online)
+            return self.build / "firmware" / build_id, {}
         if stage == "metadata":
             target = builder.metadata_path(root)
             if target.exists():
@@ -242,6 +246,7 @@ def run(root, command, *, online=False):
         elif command == "build-tools": pipeline.ensure("tools")
         elif command == "build-root": pipeline.ensure("root")
         elif command == "sbom": pipeline.ensure("sbom")
+        elif command == "firmware-sources": pipeline.ensure("firmware-sources")
         elif command == "check-initrd": pipeline.ensure("check-initrd")
         elif command == "check-rootfs": pipeline.ensure("check-rootfs")
         else:

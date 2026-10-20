@@ -35,6 +35,10 @@ build-rootfs *options:
 sbom *options:
     python3 -B scripts/firearc.py sbom "$@"
 
+# Exact-commit acquisition of pinned upstream firmware sources. Network required.
+firmware-sources *options:
+    python3 -B scripts/firearc.py firmware-sources "$@"
+
 build *options:
     python3 -B scripts/firearc.py build "$@"
 
