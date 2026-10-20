@@ -91,6 +91,14 @@ qualification. The complete secured appliance is not yet implemented.
   machinery (config + RW_A/RW_AB 8 MiB layouts); adoption needs a custom fmd
   restoring SMMSTORE, flash-backed VBNV under QEMU, a recovery payload
   decision and — the blocker — a vboot signing key hierarchy.
+- Scope re-focused by owner decision (2026-10-20): **the current goal is the
+  enforced secure boot chain only.** PLAN §1.3 now records the chain links
+  with done/remaining status, the five-step critical path (key hierarchy →
+  unsigned UKI → enrollment/signing with rejection proofs → vboot adoption →
+  requalification), the exit criteria (G2 plus the enforcement core of G4),
+  and the deferral of Phases 5–13 until the chain is complete; Phases 14–19
+  remain post-qualification product work. Every phase heading in PLAN.md
+  carries its ACTIVE/DEFERRED/LATER disposition accordingly.
 - Bounded evidence retention (`just prune`): every successful stage build now
   prunes superseded evidence directories (keeps current + previous per stage),
   never touching device-profile-pinned provenance; the first run freed

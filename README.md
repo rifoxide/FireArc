@@ -3,6 +3,12 @@
 Verified boot and atomic OS updates for an x86-64 appliance. The implementation
 contract is [PLAN.md](PLAN.md); current status is [progress](docs/progress.md).
 
+**Current goal (owner decision, 2026-10-20): the enforced secure boot chain
+only** — nothing unsigned executes from reset to the read-only dm-verity root;
+see [PLAN §1.3](PLAN.md) for the chain links, critical path and deferred
+phases. Encrypted data, updates, rollback, attestation, recovery and product
+features stay deferred until the chain is enforced and requalified.
+
 ## Build from a checkout
 
 Prerequisites: Linux amd64, Python 3.11+, Git, `gpgv`, Docker with a running daemon,

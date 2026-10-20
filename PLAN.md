@@ -1,7 +1,7 @@
 # FireArc secure boot and atomic-update implementation plan
 
 **Date:** 2026-10-19  
-**Status:** Implementation started: Phase 0/1 foundation. See [progress](docs/progress.md); no completed appliance is claimed.
+**Status:** Foundation and the unsigned development chain are complete and qualified (gates G0/G1 closed). **Current goal: the enforced secure boot chain only — see §1.3.** No completed appliance is claimed; current state is in [progress](docs/progress.md).
 **Primary specification:** `FireArc_R-D_Plan—Technical_Team.pdf`, dated 2026-10-17, all 13 pages.  
 **Implementation workspace:** this repository checkout.
 **Initial target:** x86-64 QEMU Q35; physical reference units and ODM hardware are unavailable.
@@ -44,6 +44,7 @@ pinned sources and authenticated Debian packages
 | Encryption later | Root-slot encryption is deferred, not part of this implementation. |
 | Updates | **RAUC**, not Mender. |
 | Data recovery | Unique per-device recovery credential, escrowed offline with audited, two-person access. |
+| Current milestone (2026-10-20) | **The secure boot chain only** — enforce the signed links from reset to the read-only dm-verity root; every later phase is deferred until it is enforced and requalified (§1.3). |
 
 The ESP, UKIs, root images and verity trees remain unencrypted. Their integrity must be authenticated by the boot chain. No device secret may be embedded in those public artifacts.
 
@@ -63,6 +64,56 @@ Maintain separate completion labels:
 4. **Physical platform qualified:** actual reference units pass firmware-root, TPM, flash, recovery and power-loss tests.
 
 Do not call the whole R&D program complete when only this B/C subset is complete.
+
+### 1.3 Current implementation goal — the secure boot chain only (2026-10-20)
+
+**Owner decision (2026-10-20): the current goal is the secure boot chain alone.**
+All later phases stay planned below but are deferred until the chain is
+enforced and requalified; nothing in them is authorized for implementation now.
+
+The enforced chain — reset to read-only root, nothing unsigned executing:
+
+| Link | Status |
+| --- | --- |
+| Pinned, reproducible firmware build (host-anchored per ADR 0005) | **done** — three byte-identical builds |
+| vboot protected-RO verification of mutable firmware/payload regions | remaining — investigated and feasible; needs board-layout change + signing keys |
+| FireArc Secure Boot: PK/KEK/db/dbx enrollment, `SecureBoot=1` | remaining — blocked on the key hierarchy |
+| Signed systemd-boot (normal and fallback `BOOTX64.EFI` paths) | remaining |
+| Signed slot-specific UKI with the verity authority embedded | remaining — unsigned UKI construction is unblocked |
+| Initramfs full-root verity preverification | **done** in development form; the authority moves into signed UKI content |
+| Read-only dm-verity root (slot A) | **done**; slot B and switching are update-phase work, deferred |
+
+Critical path, in order:
+
+1. **Development key hierarchy** — decide roles and custody, generate outside
+   source/build trees (Phase 2 items 8–11). This is the single blocker and an
+   owner decision.
+2. **Unsigned UKI construction** after frozen root bytes (Phase 3 item 11,
+   Phase 4 items 3–4) — unblocked and next.
+3. **Sign boot manager and UKIs, enroll PK/KEK/db, prove `SecureBoot=1`,
+   `SetupMode=0` and unsigned/wrong-key/modified rejection** (Phase 2 items
+   12–13; Phase 4 items 5–7 and 13).
+4. **vboot adoption** per the investigation: custom fmd restoring SMMSTORE,
+   flash-backed VBNV, futility-signed RW regions, wrong-key/modified RW
+   rejection before payload execution (Phase 2 item 6).
+5. **Requalify on the enforcing image**: layout classification, SMMSTORE
+   write confinement, the three-discipline check-boot gate and device-profile
+   identity continuity.
+
+**Exit criteria for the current goal:** gate G2 passes and the
+chain-enforcement core of gate G4 passes — nothing unsigned executes from
+reset to the verified read-only root, with a recorded rejection test at every
+link. G3's signed-authority embedding completes with step 2; its corruption
+controls already pass.
+
+**Deferred until the chain is done** (tracked below, not current work):
+Phase 5 (LUKS2/TPM data sealing), Phase 6 (RAUC updates), Phase 7 (health and
+rollback), Phase 8 (attestation; also blocked on the payload's missing TPM
+stack), Phase 9 (recovery), Phase 10 (firmware update rotation), Phase 11
+(release hardening/CI), Phase 12 (integrated qualification), Phase 13
+(hardware transfer). Phases 14–19 remain post-qualification product work per
+§1.2. The ADR 0005 host-anchor limitation applies to every QEMU claim made on
+the way.
 
 ## 2. Requirements traced to the R&D PDF
 
@@ -322,6 +373,8 @@ Check only steps supported by project code and recorded validation. A checked do
 
 ### Phase 0 — Freeze requirements, pin inputs and record decisions
 
+**Status:** Foundation, in service — residual unchecked items below are pending user re-check.
+
 **Owner:** platform lead + firmware engineer + security reviewer.  
 **Depends on:** supplied PDF and approved architecture decisions.
 **Output:** requirements, upstream input locks and approved threat model.
@@ -340,6 +393,8 @@ Check only steps supported by project code and recorded validation. A checked do
 **Exit gate G0:** requirements, threat model, upstream input locks and scope reviewed. No private-key transfer is required.
 
 ### Phase 1 — Standalone workspace, pinned builders and persistent Q35 harness
+
+**Status:** Foundation, in service — device-harness items (10–16) complete; items 1–9 factually complete pending re-check.
 
 **Owner:** build/release engineer + platform engineer.  
 **Depends on:** G0.  
@@ -366,6 +421,8 @@ Check only steps supported by project code and recorded validation. A checked do
 
 ### Phase 2 — Rebuild firmware and establish FireArc trust ownership
 
+**Status:** **ACTIVE — core of the current goal** (§1.3): key hierarchy, enrollment, vboot signing.
+
 **Owner:** firmware engineer + security reviewer.  
 **Depends on:** G1.  
 **Output:** self-built enforcement-on firmware, documented firmware-root model and key procedures.
@@ -390,6 +447,8 @@ Check only steps supported by project code and recorded validation. A checked do
 **Exit gate G2:** reproducibly buildable coreboot/UEFI enforces FireArc trust across persistent reboots; unauthorized EFI images/variable updates fail. Firmware-verification claims have a separate test result or remain **blocked**, not implied by the OS gate.
 
 ### Phase 3 — mkosi Debian image, FireArc kernel and authenticated read-only root
+
+**Status:** **ACTIVE** (§1.3) — current-goal remainder is UKI construction and signed-authority embedding (items 8, 11); items 3–7 and 13–14 support the chain.
 
 **Owner:** two platform engineers; security review of initramfs.  
 **Depends on:** G1; coordinate trust inputs with Phase 2.  
@@ -416,6 +475,8 @@ Check only steps supported by project code and recorded validation. A checked do
 
 ### Phase 4 — Installed GPT disk, signed systemd-boot and A/B boot assessment
 
+**Status:** **ACTIVE after G2** (§1.3) — chain items 3–8 and 13 are current-goal; boot-assessment/health wiring (9–12, 14) may trail.
+
 **Owner:** platform engineer + firmware engineer.  
 **Depends on:** G2–G3.  
 **Output:** installed A/B boot path, before RAUC integration.
@@ -439,6 +500,8 @@ Check only steps supported by project code and recorded validation. A checked do
 **Exit gate G4:** actual systemd-boot chain is enforced; candidate attempts persist; failed candidates cannot bypass verity or permanently prevent a valid fallback.
 
 ### Phase 5 — TPM measurements and LUKS2 persistent data
+
+**Status:** DEFERRED until the enforced boot chain is complete (§1.3).
 
 **Owner:** platform engineer + TPM/security engineer.  
 **Depends on:** G4 and persistent swtpm harness.  
@@ -464,6 +527,8 @@ Check only steps supported by project code and recorded validation. A checked do
 **Exit gate G5:** unique TPM-bound data unlock works across permitted A/B transitions; a moved disk does not unlock with another TPM; authorized escrow recovery is tested; failed unlock never becomes silent reset or plaintext persistence.
 
 ### Phase 6 — Signed RAUC bundles, custom boot backend and two-stage activation
+
+**Status:** DEFERRED until the enforced boot chain is complete (§1.3).
 
 **Owner:** platform/update engineer + security reviewer.  
 **Depends on:** G4–G5.  
@@ -491,6 +556,8 @@ Check only steps supported by project code and recorded validation. A checked do
 
 ### Phase 7 — Health checks, automatic rollback and data compatibility
 
+**Status:** DEFERRED until the enforced boot chain is complete (§1.3).
+
 **Owner:** platform engineer + network/test engineer.  
 **Depends on:** G6.  
 **Output:** bounded unattended acceptance/fallback, not merely selectable A/B images.
@@ -515,6 +582,8 @@ Check only steps supported by project code and recorded validation. A checked do
 
 ### Phase 8 — Measured boot and independent TPM quote verification
 
+**Status:** DEFERRED (§1.3); also blocked on the pinned payload's missing TPM stack.
+
 **Owner:** TPM/security engineer; backend engineer for the test verifier.  
 **Depends on:** G5 and stable A/B measurement identities.  
 **Output:** the PDF's working test attestation server and evidence.
@@ -534,6 +603,8 @@ Check only steps supported by project code and recorded validation. A checked do
 **Exit gate G8:** an independent verifier accepts fresh quotes for approved releases and rejects identity, freshness and measured-state substitutions. A readiness marker is never accepted as quote evidence.
 
 ### Phase 9 — Signed recovery, factory reset and one-time break-glass
+
+**Status:** DEFERRED until the enforced boot chain is complete (§1.3).
 
 **Owner:** platform engineer + security reviewer.  
 **Depends on:** G5–G8.  
@@ -557,6 +628,8 @@ Check only steps supported by project code and recorded validation. A checked do
 **Exit gate G9:** authorized diagnostics, reset, repair and escrow recovery work; unauthorized users cannot turn recovery into a boot-verification bypass; one-time/device-bound behavior is tested.
 
 ### Phase 10 — Signed firmware updates, trust rotation and downgrade policy
+
+**Status:** DEFERRED until the enforced boot chain is complete (§1.3).
 
 **Owner:** firmware engineer + release/security engineers.  
 **Depends on:** G2, G7–G9.  
@@ -583,6 +656,8 @@ Check only steps supported by project code and recorded validation. A checked do
 
 ### Phase 11 — Hardening, reproducibility, SBOM and release CI
 
+**Status:** DEFERRED (§1.3); preliminary SBOM and reproducibility evidence is already recorded in docs/.
+
 **Owner:** build/release engineer + platform/security engineers.  
 **Depends on:** begin during Phase 3; complete after G10.  
 **Output:** repeatable, reviewable release artifacts and security baseline.
@@ -607,6 +682,8 @@ Check only steps supported by project code and recorded validation. A checked do
 **Exit gate G11:** two independent builds meet the documented identical-hash requirements; hardening assessment, SBOM, licenses/source obligations, provenance and controlled signing are present for every release.
 
 ### Phase 12 — Integrated qualification, power-loss campaign and performance targets
+
+**Status:** DEFERRED until the enforced boot chain is complete (§1.3).
 
 **Owner:** test engineer + platform/network engineers.  
 **Depends on:** G7–G11.  
@@ -633,6 +710,8 @@ Check only steps supported by project code and recorded validation. A checked do
 **Exit gate G12:** QEMU lifecycle acceptance passes without signature bypasses, manual rollback or hidden state resets. Unmet targets and unavailable physical evidence remain visible, not declared complete.
 
 ### Phase 13 — Transfer to reference units and ODM hardware when available
+
+**Status:** DEFERRED — external dependency (hardware availability); see §1.3.
 
 **Owner:** firmware + hardware + platform engineers.  
 **Depends on:** hardware arrival, recovery equipment and legal approval.  
@@ -664,6 +743,8 @@ Check only steps supported by project code and recorded validation. A checked do
 
 ### Phase 14 — After secure-platform qualification: Firewalla study and clean-room handoff
 
+**Status:** LATER — post-qualification product work, gated by §1.2; not part of the current goal (§1.3).
+
 **Owner:** separate product analyst + network engineer study team; independent reviewer.
 
 **Depends on:** G12 for the user's requested post-boot-chain sequence; legal approval before reference-device/source study. Physical observations also require the reference units.
@@ -691,6 +772,8 @@ Phase 13 is a hardware-arrival branch, not a reason to stop all virtual follow-o
 
 ### Phase 15 — Independent FireArc data plane and IPS on the secured Debian base
 
+**Status:** LATER — post-qualification product work, gated by §1.2; not part of the current goal (§1.3).
+
 **Owner:** network engineer + detection engineer, using approved specifications/public standards only.
 
 **Depends on:** G12 and reviewed specifications relevant to the feature being implemented.
@@ -717,6 +800,8 @@ Phase 13 is a hardware-arrival branch, not a reason to stop all virtual follow-o
 
 ### Phase 16 — DNS security, RPZ delivery and NDR event interfaces
 
+**Status:** LATER — post-qualification product work, gated by §1.2; not part of the current goal (§1.3).
+
 **Owner:** network engineer, shared with Phase 15; feed-license reviewer.
 
 **Depends on:** secured image/update lifecycle and the relevant reviewed DNS/policy specifications.
@@ -739,6 +824,8 @@ Phase 13 is a hardware-arrival branch, not a reason to stop all virtual follow-o
 **Exit gate G16:** RPZ order/group isolation, authenticated delivery, bypass policy, event output and failure recovery are demonstrated; feed licensing and hardware scale results are reviewed or explicitly pending.
 
 ### Phase 17 — Device inventory, NDR features and the first seven detections
+
+**Status:** LATER — post-qualification product work, gated by §1.2; not part of the current goal (§1.3).
 
 **Owner:** detection engineer + data scientist; no Firewalla source access.
 
@@ -765,6 +852,8 @@ Phase 13 is a hardware-arrival branch, not a reason to stop all virtual follow-o
 
 ### Phase 18 — arcd enrollment, signed configuration and reversible response prototype
 
+**Status:** LATER — post-qualification product work, gated by §1.2; not part of the current goal (§1.3).
+
 **Owner:** two backend engineers, building from reviewed behavior/protocol requirements.
 
 **Depends on:** secure platform/TPM identity, data-plane and DNS control interfaces, and the required telemetry/event schemas.
@@ -789,6 +878,8 @@ Phase 13 is a hardware-arrival branch, not a reason to stop all virtual follow-o
 **Exit gate G18:** arcd performs the required prototype lifecycle with signed configuration, bounded offline operation and reversible guarded responses. Hardware TPM identity and VP2440 demonstration stay pending until physically tested.
 
 ### Phase 19 — Cross-workstream benchmarks and full R&D exit review
+
+**Status:** LATER — post-qualification product work, gated by §1.2; not part of the current goal (§1.3).
 
 **Owner:** program lead + independent technical/legal reviewers; owners A–H.
 
