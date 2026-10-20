@@ -17,8 +17,10 @@ import os
 from pathlib import Path
 import re
 import shutil
+import subprocess
+import time
 
-from . import builder, firmware_layout, rootfs
+from . import builder, firmware_layout, qmp, rootfs
 from .inputs import load_lock
 from .integrity import (
     SafetyError, identifier, private_directory, read_json, regular_file, sha256,
@@ -49,6 +51,25 @@ PARTITIONS = (
 KERNEL_CMDLINE = ("root=/dev/mapper/firearc-root rootfstype=ext4 rootflags=ro,noload ro "
                   "rauc.slot=A rd.shell=0 rd.emergency=poweroff console=ttyS0,115200")
 
+# The dev unit waits out this many seconds after its markers before powering
+# off. This fallback is best-effort only: the unit runs in the initrd, and
+# switch_root's cleanup stops it first, so in practice every session is ended
+# by the harness over QMP (orderly quit, powerdown request or hard kill).
+GRACE_SECONDS = 25
+
+# Sustained serial silence for this long suggests the payload is parked at
+# its interactive boot menu; send a recorded ENTER nudge, at most this many
+# times per session, before the hard timeout fails the boot closed.
+MENU_UNSTICK_AFTER = 45
+MENU_UNSTICK_MAX = 3
+
+
+def die_with_parent():
+    """preexec_fn: orphaned machines must not outlive the harness process."""
+    import ctypes
+    import signal
+    ctypes.CDLL("libc.so.6", use_errno=True).prctl(1, signal.SIGKILL, 0, 0, 0)
+
 DEV_UNIT = """[Unit]
 Description=FireArc development boot smoke terminal
 DefaultDependencies=no
@@ -67,9 +88,12 @@ StandardError=journal+console
 # TPM 2.0 device through ACPI (QEMU's tpm-tis presents the MSFT0101 device; the
 # chip lands at /sys/class/tpm/tpm0 with tpm_version_major=2 and /dev/tpm0);
 # without a TPM attached the profile boot gate expects the explicit miss line. The debug lines are dev-harness
-# diagnostics only. Shutdown uses the immediate poweroff syscall: a systemd
-# shutdown job raced switch_root to the real root in observed runs.
-ExecStart=/bin/sh -c 'echo FIREARC_TPM_DEBUG_CLASS=$(ls /sys/class 2>/dev/null | grep -i tpm); echo FIREARC_TPM_DEBUG_TPM0=$(ls /sys/class/tpm/tpm0 2>&1); echo FIREARC_TPM_DEBUG_VERSION=$(cat /sys/class/tpm/tpm0/tpm_version_major 2>&1); echo FIREARC_TPM_DEBUG_DEV=$(ls /dev/tpm0 /dev/tpmrm0 2>&1); if [ -c /dev/tpm0 ] && [ -d /sys/class/tpm/tpm0 ] && [ "$(cat /sys/class/tpm/tpm0/tpm_version_major 2>/dev/null)" = "2" ]; then echo FIREARC_TPM_TIS_OK > /dev/console; else echo FIREARC_TPM_TIS_MISSING > /dev/console; fi; if grep -Eq " /sysroot ext4 ro(,| )" /proc/mounts; then echo FIREARC_DEV_BOOT_OK > /dev/console; echo FIREARC_DEV_BOOT_OK > /dev/console; else echo FIREARC_DEV_BOOT_MISSING > /dev/console; fi; /usr/bin/poweroff -f || /usr/bin/systemctl --no-block --force poweroff'
+# diagnostics only. After the markers the unit stays up in a bounded grace
+# window (GRACE_SECONDS) so harness operations — QMP reset/powerdown or a
+# power cut — act on a running machine; only then does it fall back to the
+# immediate poweroff syscall (a systemd shutdown job once raced switch_root
+# to the real root in observed runs).
+ExecStart=/bin/sh -c 'echo FIREARC_TPM_DEBUG_CLASS=$(ls /sys/class 2>/dev/null | grep -i tpm); echo FIREARC_TPM_DEBUG_TPM0=$(ls /sys/class/tpm/tpm0 2>&1); echo FIREARC_TPM_DEBUG_VERSION=$(cat /sys/class/tpm/tpm0/tpm_version_major 2>&1); echo FIREARC_TPM_DEBUG_DEV=$(ls /dev/tpm0 /dev/tpmrm0 2>&1); if [ -c /dev/tpm0 ] && [ -d /sys/class/tpm/tpm0 ] && [ "$(cat /sys/class/tpm/tpm0/tpm_version_major 2>/dev/null)" = "2" ]; then echo FIREARC_TPM_TIS_OK > /dev/console; else echo FIREARC_TPM_TIS_MISSING > /dev/console; fi; if grep -Eq " /sysroot ext4 ro(,| )" /proc/mounts; then echo FIREARC_DEV_BOOT_OK > /dev/console; echo FIREARC_DEV_BOOT_OK > /dev/console; else echo FIREARC_DEV_BOOT_MISSING > /dev/console; fi; sleep 25; /usr/bin/poweroff -f || /usr/bin/systemctl --no-block --force poweroff'
 """
 
 LOADER_CONF = "timeout 0\ndefault firearc-a\neditor no\n"
@@ -145,18 +169,27 @@ def sfdisk_script():
     return "\n".join(lines) + "\n"
 
 
-def qemu_command(firmware, disk, serial, *, kvm, tpm=None):
+def qemu_command(firmware, disk, serial, *, kvm, tpm=None, qmp_socket=None, rebootable=False):
     # The payload has no virtio drivers: the development disk is presented
     # over the emulated ICH9 AHCI controller the payload does support.
     command = ["qemu-system-x86_64", "-machine", "q35", "-accel", "kvm" if kvm else "tcg",
-               "-cpu", "max", "-m", "2048", "-nodefaults", "-display", "none", "-no-reboot",
-               "-net", "none", "-serial", f"file:{serial}",
-               # Monolithic firmware: the writable pflash copy carries both code
-               # and the SMMSTORE variable region (no OVMF-style CODE/VARS split).
-               "-drive", f"if=pflash,format=raw,file={firmware}",
-               "-device", "ahci,id=ahci0",
-               "-drive", f"if=none,id=disk0,file={disk},format=raw",
-               "-device", "ide-hd,drive=disk0,bus=ahci0.0"]
+               "-cpu", "max", "-m", "2048", "-nodefaults", "-display", "none",
+               "-net", "none", "-serial", f"file:{serial}"]
+    # Reset loops must exit instead of spinning forever — unless the operator
+    # explicitly runs a reboot operation, which needs in-process resets.
+    if not rebootable:
+        command += ["-no-reboot"]
+    if qmp_socket:
+        # Local-only control socket (unix, inside the 0700 evidence/run
+        # directory) for automated reset/powerdown/stop of the machine.
+        command += ["-qmp", f"unix:{qmp_socket},server,nowait"]
+    command += [
+        # Monolithic firmware: the writable pflash copy carries both code
+        # and the SMMSTORE variable region (no OVMF-style CODE/VARS split).
+        "-drive", f"if=pflash,format=raw,file={firmware}",
+        "-device", "ahci,id=ahci0",
+        "-drive", f"if=none,id=disk0,file={disk},format=raw",
+        "-device", "ide-hd,drive=disk0,bus=ahci0.0"]
     if tpm:
         # Exactly one emulated TPM per machine, over the ISA TIS interface,
         # backed by the device profile's isolated swtpm control socket.
@@ -164,6 +197,168 @@ def qemu_command(firmware, disk, serial, *, kvm, tpm=None):
                     "-tpmdev", "emulator,id=tpm0,chardev=chrtpm",
                     "-device", "tpm-tis,tpmdev=tpm0"]
     return command
+
+
+class VmSession:
+    """One QEMU process under local QMP control.
+
+    The machine's lifecycle is explicit at every exit path: orderly QMP quit,
+    operator-requested powerdown, hard kill for power-cut tests, or the
+    machine leaving by itself. Serial evidence is watched live; evidence
+    files mirror builder.logged's shape (command/stdout/stderr/exit).
+    """
+
+    def __init__(self, work, name, command, socket_path, *, timeout=1800):
+        self.work = work
+        self.name = name
+        self.command = command
+        self.socket_path = socket_path
+        self.timeout = timeout
+        self.process = None
+        self.control = None
+        self.serial_path = None
+        self.keypresses = 0
+        self._out = None
+        self._err = None
+        self.deadline = 0.0
+
+    def start(self, serial_path):
+        write_json(self.work / (self.name + ".command.json"), self.command)
+        self.serial_path = serial_path
+        self._out = (self.work / (self.name + ".stdout")).open("xb")
+        self._err = (self.work / (self.name + ".stderr")).open("xb")
+        self.process = subprocess.Popen(self.command, stdin=subprocess.DEVNULL,
+                                        stdout=self._out, stderr=self._err,
+                                        preexec_fn=die_with_parent)
+        self.deadline = time.monotonic() + self.timeout
+        ready = time.monotonic() + 30
+        while not self.socket_path.exists():
+            if self.process.poll() is not None:
+                raise SafetyError(f"QEMU exited before opening the control socket "
+                                  f"(rc={self.process.returncode})")
+            if time.monotonic() > ready:
+                raise SafetyError("QEMU did not open its QMP control socket")
+            time.sleep(0.05)
+        self.control = qmp.QmpControl(self.socket_path).connect()
+        return self
+
+    def serial_text(self):
+        if self.serial_path is None:
+            return ""
+        return self.serial_path.read_text(errors="replace")
+
+    def press_enter(self):
+        """One ENTER keypress over QMP input-send-event (emulated keyboard).
+
+        The payload's interactive boot menu ("ENTER to boot directly") can
+        fail to auto-continue from a pristine variable store (observed
+        2026-10-20 on fresh profiles). This bounded, recorded nudge lets the
+        machine boot while keeping the payload defect visible in evidence;
+        it is never sent while serial output is still flowing.
+        """
+        if not self.alive():
+            return False
+        self.control.command("input-send-event", events=[
+            {"type": "key", "data": {"down": True, "key": {"type": "qcode", "data": "ret"}}},
+            {"type": "key", "data": {"down": False, "key": {"type": "qcode", "data": "ret"}}},
+        ])
+        self.keypresses += 1
+        return True
+
+    def wait_until(self, predicate):
+        """Poll the serial log until predicate(text) holds or QEMU leaves.
+
+        Sustained serial silence suggests the payload is waiting at its
+        interactive boot menu; a bounded number of ENTER keypresses is sent
+        and recorded before the hard timeout fails the session closed.
+        """
+        last_size = -1
+        last_growth = time.monotonic()
+        while True:
+            text = self.serial_text()
+            if predicate(text):
+                return text
+            if self.process.poll() is not None:
+                # The machine is gone; the caller judges the final log.
+                return self.serial_text()
+            try:
+                size = self.serial_path.stat().st_size
+            except OSError:
+                size = 0
+            if size != last_size:
+                last_size = size
+                last_growth = time.monotonic()
+            elif self.keypresses < MENU_UNSTICK_MAX \
+                    and time.monotonic() - last_growth >= MENU_UNSTICK_AFTER:
+                self.press_enter()
+                last_growth = time.monotonic()
+            if time.monotonic() > self.deadline:
+                self.process.kill()
+                raise SafetyError(f"QEMU session {self.name} timed out after "
+                                  f"{self.timeout}s without the expected serial output")
+            time.sleep(0.1)
+
+    def alive(self):
+        return self.process is not None and self.process.poll() is None
+
+    def reset(self):
+        """In-process machine reset; firmware and devices stay powered."""
+        if not self.alive():
+            raise SafetyError("Cannot reset a machine that already left")
+        self.control.command("system_reset")
+
+    def powerdown(self):
+        """Operator power-down request (ACPI power button)."""
+        if not self.alive():
+            raise SafetyError("Cannot power down a machine that already left")
+        self.control.command("system_powerdown")
+
+    def quit(self):
+        """Orderly stop of the machine by the harness."""
+        if self.alive():
+            self.control.command("quit")
+        return self.wait_exit(120)
+
+    def kill(self):
+        """Hard kill: the emulated board loses power without cleanup."""
+        if self.alive():
+            self.process.kill()
+        return self.wait_exit(30)
+
+    def wait_exit(self, timeout):
+        try:
+            self.process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired as error:
+            self.process.kill()
+            self.process.wait(timeout=30)
+            raise SafetyError(f"QEMU session {self.name} did not exit within "
+                              f"{timeout}s") from error
+        return self.process.returncode
+
+    def close(self):
+        """Finalize evidence; safe once the process has left."""
+        if self.process is None:
+            return
+        if self.control is not None:
+            self.control.close()
+        for stream in (self._out, self._err):
+            if stream is not None and not stream.closed:
+                stream.close()
+        write_json(self.work / (self.name + ".exit.json"),
+                   {"returncode": self.process.returncode,
+                    "qmp_controlled": self.control is not None,
+                    "menu_unstick_keypresses": self.keypresses,
+                    "timeout": self.timeout})
+
+
+def start_vm(work, name, *, flash, disk, serial, kvm, tpm=None, rebootable=False,
+             timeout=1800):
+    """Start one QEMU machine under QMP control inside an evidence directory."""
+    socket_path = work / (name + ".qmp.sock")
+    return VmSession(work, name,
+                     qemu_command(flash, disk, serial, kvm=kvm, tpm=tpm,
+                                  qmp_socket=socket_path, rebootable=rebootable),
+                     socket_path, timeout=timeout).start(serial)
 
 
 def boot_verdict(serial_text):
@@ -340,15 +535,24 @@ def check_boot(root, tools_label, device_label, firmware_label, label):
             flash = work / ("flash-" + name + ".rom")
             shutil.copyfile(rom, flash)
             serial = work / ("serial-" + name + ".log")
-            builder.logged(work, "qemu-boot-" + name, qemu_command(
-                flash, target, serial, kvm=kvm), timeout=1800)
+            # QMP-controlled machine: the harness stops QEMU itself as soon as
+            # the serial verdict is in; no reliance on the guest powering off.
+            session = start_vm(work, "qemu-boot-" + name, flash=flash, disk=target,
+                               serial=serial, kvm=kvm, timeout=1800)
+            try:
+                session.wait_until(lambda text: REQUIRED_MARKER in text
+                                   or DENIAL_MARKER.search(text))
+                session.quit()  # no-op if the machine already left on its own
+            finally:
+                session.close()
             markers, denial = boot_verdict(serial.read_text(errors="replace"))
             # Guest firmware writes must land only in the declared variable
             # store; every code, flash-map, preserved and unmapped byte of the
             # booted flash copy must match the pristine image.
             flash_runs[name] = firmware_layout.write_confinement(
                 pristine, flash.read_bytes(), layout)
-            runs[name] = {"markers": markers, "denial": denial, "exited": True}
+            runs[name] = {"markers": markers, "denial": denial, "exited": True,
+                          "menu_unstick_keypresses": session.keypresses}
             if corrupt:
                 if any(markers.values()) or not denial["denial"]:
                     raise SafetyError("Corrupted root was accepted or produced no verity denial")

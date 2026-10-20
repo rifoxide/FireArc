@@ -57,6 +57,27 @@ device-provision *options:
 device-boot *options:
     python3 -B scripts/firearc.py device-boot "$@"
 
+# Warm-reset a running machine in place (one QEMU+swtpm session, flash and TPM
+# stay powered through every reset); ends on a full verified boot.
+device-reboot *options:
+    python3 -B scripts/firearc.py device-reboot "$@"
+
+# Boot to the marker, then stop the machine through the QMP powerdown request.
+device-stop *options:
+    python3 -B scripts/firearc.py device-stop "$@"
+
+# Cut power hard after a verified boot: QEMU and swtpm die without cleanup.
+device-powercut *options:
+    python3 -B scripts/firearc.py device-powercut "$@"
+
+# Copy the whole persistent device state into a named immutable snapshot.
+device-snapshot *options:
+    python3 -B scripts/firearc.py device-snapshot "$@"
+
+# Explicitly restore persistent device state from a named snapshot.
+device-restore *options:
+    python3 -B scripts/firearc.py device-restore "$@"
+
 # Delete superseded stage evidence; keeps each stage's current + previous dir
 # (runs automatically after every successful stage build, too).
 prune *options:

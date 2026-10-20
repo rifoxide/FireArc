@@ -8,9 +8,32 @@ installed-device profile under `build/devices/<n>/`, and
 mutable machine state, deliberately outside the reproducible stage graph: the
 OS disk, the writable firmware copy (whose SMMSTORE region carries UEFI
 variables) and one isolated swtpm TPM 2.0 state directory survive every boot.
+Every machine session runs under a **local-only QMP control socket** (unix
+socket inside the run directory; never TCP) so the harness — not the guest —
+ends each session, and serial evidence is captured headlessly per run.
+Interactive support sessions that could contain recovery secrets are not
+captured at all.
+
+Operator operations on a running profile, all explicit and recorded in the
+profile's operations history:
+
+| Command | What it does |
+| --- | --- |
+| `just device-reboot --name <n> --resets <k>` | warm-reset loop in ONE powered session (same QEMU+swtpm; flash/TPM stay powered through every reset); ends on a full verified boot |
+| `just device-stop --name <n>` | boot to the verified marker, request power-down over QMP; whether the appliance honors the ACPI power button is recorded, and the harness stops the machine itself if it does not |
+| `just device-powercut --name <n>` | let the machine settle into the booted OS, then SIGKILL QEMU and swtpm (no TPM2_Shutdown, no variable flush) and assert nothing silently reset |
+| `just device-snapshot --name <n> --label <l>` | immutable, digest-verified copy of disk + flash + TPM state |
+| `just device-restore --name <n> --label <l>` | the only state-restoration path: explicit operator command, never implicit |
+
+A failed session that already ran the machine adopts the observed flash/TPM
+identity as the new baseline with an explicit `failed` operations record —
+later sessions assert continuity from what actually happened, and nothing is
+ever silently reset. QEMU and swtpm carry `PR_SET_PDEATHSIG`, so orphaned
+machines cannot outlive the harness process.
+
 This is the development trust domain: unsigned profile, host-trusted QEMU and
 swtpm custody, no PCR measurements (the pinned EDK II payload contains no TPM
-stack), no warm-reboot loops, no power-cut or snapshot operations.
+stack).
 
 ## State layout and operations
 
@@ -54,7 +77,58 @@ Profile `dev1`, two cold starts (`--count 2`):
   the boot. State persisted across both cold starts.
 - Disk: byte-identical after both boots (read-only verity root, nothing wrote).
 
+### Gate G1 sequence (profile `dev2`, 2026-10-20, KVM)
+
+Eleven recorded operations, audit trail in the profile:
+
+- **2 cold starts**: variable store initialized then evolved inside SMMSTORE
+  only; TPM state carried byte-exactly between boots; markers reached.
+- **Warm-reboot loop (`--resets 2`)**: one QEMU process and one swtpm process
+  served 3 boots. The dev unit's terminal marker printed 6 times (twice per
+  boot) and the TPM TIS marker 3 times (once per boot); the variable store was
+  carried across resets and evolved (`…62cf2 → …a28ae`), never restored to the
+  pristine image; every flash write stayed confined to SMMSTORE; QEMU exited
+  rc 0 under QMP control.
+- **Stop**: power-down requested over QMP after the verified marker; the
+  appliance **ignored the ACPI power button** for the bounded 30 s window
+  (recorded `acpi_powerdown_honored: false`), and the harness stopped the
+  machine itself (clean rc 0). An earlier stop attempt failed closed before
+  this behavior was understood (see findings); its observed state was adopted
+  with an explicit failed-operation record.
+- **Snapshot `pre-powercut`**: disk + flash + TPM copied, manifest digests
+  recorded, immutable afterwards.
+- **Power cut**: after the marker the machine settled into the fully booted
+  OS, then QEMU and swtpm were SIGKILLed (rc −9). The variable store had
+  moved only by that session's legitimate guest writes and did not revert to
+  the pristine image; TPM state survived; the next cold start booted the
+  machine from exactly the post-cut state (crash recovery).
+- **Explicit restore `pre-powercut`**: state replaced by operator command,
+  identity baseline reset to the snapshot's; the following boot reached the
+  verified marker from the restored identity.
+
 ## Findings recorded during qualification
+
+- **Payload boot-menu stall (intermittent, real defect):** from a pristine
+  variable store the EDK II payload sometimes parks at its interactive menu
+  ("ENTER to boot directly") and never auto-continues — observed twice on
+  fresh profiles (16+ minutes each) while other pristine boots
+  auto-continued (2 stalls / 4 passes observed, plus one earlier one-off).
+  The harness now sends a bounded ENTER keypress over QMP (`input-send-event`;
+  QEMU 11 removed `sendkey`) after 45 s of serial silence, at most 3 times,
+  every keypress recorded in the run evidence (`menu_unstick_keypresses`).
+  The nudge fired for real during qualification (2 keypresses, boot
+  continued). The payload's menu behavior needs review before release.
+- **ACPI power button is not handled** by the development appliance: a QMP
+  `system_powerdown` request is ignored for the whole bounded window (no
+  logind power-key handling in the minimal root). `device-stop` records this
+  honestly and stops the machine itself. The production appliance needs an
+  explicit power-button policy.
+- **The dev unit's poweroff is best-effort only:** the unit runs in the
+  initrd, and switch_root's `initrd-cleanup.service` stops it — including its
+  grace sleep — before its fallback `poweroff -f` can run. Every session is
+  therefore ended by the harness over QMP (orderly quit, powerdown request
+  or hard kill), and QEMU/swtpm carry `PR_SET_PDEATHSIG` so orphaned
+  machines die with the harness process.
 
 - **Duplicate ACPI TPM object:** QEMU's board ACPI exposes the TPM as two
   `MSFT0101` devices; the second probe fails `-EBUSY` on the same MMIO region,
@@ -71,11 +145,6 @@ Profile `dev1`, two cold starts (`--count 2`):
   `systemctl --no-block --force poweroff`, which once lost the race to
   `switch_root` and booted into the real root's login prompt. The unit now
   issues the immediate `poweroff -f` syscall (systemctl fallback retained).
-- **One-time payload menu stall (open):** in one run the EDK II payload sat at
-  its interactive boot menu ("ENTER to boot directly") from a pristine
-  variable store and never auto-continued; the 1800 s per-boot timeout fails
-  the gate closed in that case. Not reproduced in subsequent boots; if it
-  recurs, the payload's menu condition needs investigation.
 - QEMU provides no persistent CMOS backend; no CMOS state is carried.
 
 ## Limits

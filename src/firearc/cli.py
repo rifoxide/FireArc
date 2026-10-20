@@ -34,6 +34,24 @@ def main():
                                help="Cold-start a persistent device profile with its swtpm")
     boot.add_argument("--name", required=True)
     boot.add_argument("--count", type=int, default=2)
+    reboot = commands.add_parser("device-reboot",
+                                 help="Warm-reset a running profile in one powered session")
+    reboot.add_argument("--name", required=True)
+    reboot.add_argument("--resets", type=int, default=2)
+    stop = commands.add_parser("device-stop",
+                               help="Boot to the marker, then stop the machine via QMP powerdown")
+    stop.add_argument("--name", required=True)
+    powercut = commands.add_parser("device-powercut",
+                                   help="Cut power hard after a verified boot (SIGKILL QEMU+swtpm)")
+    powercut.add_argument("--name", required=True)
+    snapshot = commands.add_parser("device-snapshot",
+                                   help="Copy the whole persistent device state into a named snapshot")
+    snapshot.add_argument("--name", required=True)
+    snapshot.add_argument("--label", required=True)
+    restore = commands.add_parser("device-restore",
+                                  help="Explicitly restore persistent state from a named snapshot")
+    restore.add_argument("--name", required=True)
+    restore.add_argument("--label", required=True)
     prune = commands.add_parser("prune",
                                 help="Delete superseded stage evidence (keeps current + previous)")
     prune.add_argument("--keep", type=int, default=1,
@@ -57,6 +75,21 @@ def main():
         elif args.command == "device-boot":
             with pipeline.project_lock(ROOT):
                 result = profile.boot(ROOT, args.name, count=args.count)
+        elif args.command == "device-reboot":
+            with pipeline.project_lock(ROOT):
+                result = profile.reboot(ROOT, args.name, resets=args.resets)
+        elif args.command == "device-stop":
+            with pipeline.project_lock(ROOT):
+                result = profile.stop(ROOT, args.name)
+        elif args.command == "device-powercut":
+            with pipeline.project_lock(ROOT):
+                result = profile.powercut(ROOT, args.name)
+        elif args.command == "device-snapshot":
+            with pipeline.project_lock(ROOT):
+                result = profile.snapshot(ROOT, args.name, args.label)
+        elif args.command == "device-restore":
+            with pipeline.project_lock(ROOT):
+                result = profile.restore(ROOT, args.name, args.label)
         elif args.command == "prune":
             with pipeline.project_lock(ROOT):
                 result = pipeline.prune(ROOT, keep=args.keep)

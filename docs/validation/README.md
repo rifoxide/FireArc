@@ -42,8 +42,14 @@ installed-device profile — OS disk, writable firmware copy and one isolated
 swtpm TPM 2.0 state directory — and cold-start it with fail-closed identity
 continuity: SMMSTORE and TPM state may change only inside guest execution,
 every boot must re-bind the TPM through ACPI/TIS, and provisioning never
-silently resets a device ([device profile](device-profile.md)). It is a
-development harness, not measured boot or provisioning.
+silently resets a device ([device profile](device-profile.md)). Operator
+operations — `device-reboot` (warm-reset loop in one powered session),
+`device-stop` (QMP power-down with honest ACPI evidence), `device-powercut`
+(hard kill after a verified boot), `device-snapshot`/`device-restore`
+(explicit, immutable, digest-verified state copies) — are recorded in the
+profile's operations history. Every session runs under a local-only QMP
+control socket. It is a development harness, not measured boot or
+provisioning.
 
 Record actual results and limitations against each component's acceptance
 contract. Build IDs identify immutable logs/outputs, not separate implementations

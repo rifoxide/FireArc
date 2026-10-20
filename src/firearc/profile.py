@@ -10,9 +10,17 @@ so flash/TPM identity continuity across cold starts is asserted rather than
 assumed, and nothing is ever silently reset — state changes only inside guest
 execution, and re-provisioning is an explicit operation.
 
+Beyond plain power-ons, the operator drives the machine explicitly:
+`reboot` warm-resets a running machine in place (same QEMU/swtpm processes:
+flash and TPM stay powered through the reset), `stop` requests an orderly
+power-down over the local QMP socket, `powercut` kills both processes hard
+without cleanup, and `snapshot`/`restore` copy and — only on explicit
+command — restore the whole persistent state. Ordinary boot never silently
+resets TPM/NVRAM or other identity after any failure: every operation starts
+and ends with digest assertions and fails closed.
+
 This is the development harness only: unsigned profile, host-trusted swtpm
-custody, no PCR measurements (the pinned payload carries no TPM stack), no
-warm-reboot loops and no power-cut/snapshot operations yet.
+custody, no PCR measurements (the pinned payload carries no TPM stack).
 """
 
 from datetime import datetime, timezone
@@ -28,12 +36,22 @@ import uuid
 
 from . import builder, device, firmware_layout, pipeline
 from .inputs import load_lock
-from .integrity import SafetyError, private_directory, read_json, regular_file, sha256, write_json
+from .integrity import (
+    SafetyError, private_directory, read_json, regular_file, sha256, verify_file,
+    write_json,
+)
 
 PROFILE_SCHEMA = 1
 NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
 MAX_BOOT_RUNS = 16
+MAX_RESETS = 8
 SWTPM_TIMEOUT = 120
+VM_TIMEOUT = 1800
+# stop(): how long the machine may take to honor the QMP powerdown request
+# (ACPI power button) before the harness stops it itself.
+STOP_POWERDOWN_WAIT = 30
+# powercut(): let the machine settle into the fully booted OS before cutting.
+POWERCUT_SETTLE_SECONDS = 20
 
 # TPM console lines worth archiving per boot (kernel tpm_tis/ACPI messages).
 TPM_CONSOLE_PATTERN = re.compile(r"(?i)\b(tpm|tcg2?)\b")
@@ -128,6 +146,7 @@ def _provision(root, name, device_label, firmware_label, *, replace=False):
         },
         "boots": 0,
         "tpm": {"interface": "tpm-tis", "state_dir": "tpm", "backend": "swtpm --tpm2"},
+        "operations": [{"op": "provision", "utc": datetime.now(timezone.utc).isoformat(timespec="seconds")}],
         "scope": "Development persistent device state (disk, firmware variables, TPM); "
                  "not a reproducible payload and not production provisioning",
     }
@@ -160,44 +179,237 @@ def load(root, name):
     return target, profile
 
 
-def boot(root, name, *, count=2):
-    """Cold-start the persistent profile; verify boot, writes and identity."""
-    if not 1 <= count <= MAX_BOOT_RUNS:
-        raise SafetyError(f"Boot count must be within 1..{MAX_BOOT_RUNS}")
+def next_run(runs_dir):
+    """Monotonic per-profile run directory: runs/0001, runs/0002, ..."""
+    numbers = [int(entry.name) for entry in runs_dir.iterdir()
+               if entry.is_dir() and re.fullmatch(r"[0-9]{4}", entry.name)]
+    return runs_dir / f"{max(numbers, default=0) + 1:04d}"
+
+
+def record_operation(profile, op, **fields):
+    entry = {"op": op, "utc": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+    entry.update(fields)
+    operations = profile.get("operations", [])[-63:] + [entry]
+    profile["operations"] = operations
+
+
+def _prepare(root, name):
+    """Resolve and verify everything one powered-on session needs."""
     target, profile = load(root, name)
-    provenance = profile["provenance"]
     qemu = shutil.which("qemu-system-x86_64")
     swtpm = shutil.which("swtpm")
     pins = load_lock(root, "host-tools")["tools"]
     for tool, path in (("qemu-system-x86_64", qemu), ("swtpm", swtpm)):
         if not path or sha256(Path(path)) != pins[tool]["sha256"]:
             raise SafetyError(f"Host {tool} is absent or does not match the pinned tool")
-    _, rom, _ = device.firmware_rom(root, provenance["firmware_label"])
+    _, rom, _ = device.firmware_rom(root, profile["provenance"]["firmware_label"])
     pristine = rom.read_bytes()
     layout = firmware_layout.classify(pristine, firmware_layout.parse_fmap(pristine))
-    disk = target / "disk.raw"
-    flash = target / "flash.rom"
-    tpm_dir = regular_path(target / "tpm")
-    runs_dir = regular_path(target / "runs")
-    # Identity continuity across invocations: whatever the last boot left
-    # behind must still be there, untouched, when the next cold start begins.
-    expected_state = profile.get("state_after_last_boot")
-    if expected_state:
-        assert_identity_unchanged(
-            expected_state.get("smmstore_sha256"),
-            area_digest(flash.read_bytes(), layout, firmware_layout.VARIABLE_STORE_AREA),
-            "Firmware variable-store region")
-        assert_identity_unchanged(expected_state.get("tpm_sha256"), tpm_digests(tpm_dir),
-                                  "TPM state")
+    return {
+        "target": target, "profile": profile, "pins": pins, "qemu": qemu, "swtpm": swtpm,
+        "pristine": pristine, "layout": layout,
+        "disk": regular_file(target, "disk.raw"), "flash": regular_file(target, "flash.rom"),
+        "tpm_dir": regular_path(target / "tpm"), "runs_dir": regular_path(target / "runs"),
+        "pristine_store_sha256": area_digest(pristine, layout, firmware_layout.VARIABLE_STORE_AREA),
+    }
+
+
+def _assert_session_started_from_expected_state(prepared):
+    """Identity continuity across invocations: the last session's end state
+    must still be there, untouched, when the machine powers on again."""
+    expected = prepared["profile"].get("state_after_last_boot")
+    if not expected:
+        return
+    assert_identity_unchanged(
+        expected.get("smmstore_sha256"),
+        area_digest(prepared["flash"].read_bytes(), prepared["layout"],
+                    firmware_layout.VARIABLE_STORE_AREA),
+        "Firmware variable-store region")
+    assert_identity_unchanged(expected.get("tpm_sha256"), tpm_digests(prepared["tpm_dir"]),
+                              "TPM state")
+
+
+def _assert_boot_markers(text, what):
+    """A powered-on session must reach the verified sysroot and bind the TPM."""
+    markers, denial = device.boot_verdict(text)
+    if not markers[device.REQUIRED_MARKER] or denial["denial"]:
+        raise SafetyError(f"{what} did not reach the verified read-only sysroot "
+                          f"terminal marker")
+    tpm_ok = device.TPM_TIS_MARKER in text and device.TPM_TIS_MISSING_MARKER not in text
+    if not tpm_ok:
+        raise SafetyError(f"{what} did not bind a TPM 2.0 device through ACPI/TIS "
+                          f"(no {device.TPM_TIS_MARKER!r} marker)")
+    return markers, denial
+
+
+class Machine:
+    """One power-on of the persistent device: isolated swtpm plus QEMU/QMP.
+
+    Entering starts swtpm over the persistent state directory and boots the
+    machine from the profile's disk/flash; every session reads and writes the
+    same files, so identity continuity across power-ons is asserted by the
+    caller. Leaving waits for swtpm to exit (it terminates with QEMU); after
+    a power cut both processes die hard and carry the kill status.
+    """
+
+    def __init__(self, run_dir, qemu, swtpm, flash, disk, tpm_dir, serial, *,
+                 kvm, rebootable=False, timeout=VM_TIMEOUT):
+        self.run_dir = run_dir
+        self.qemu = qemu
+        self.swtpm = swtpm
+        self.flash = flash
+        self.disk = disk
+        self.tpm_dir = tpm_dir
+        self.serial = serial
+        self.kvm = kvm
+        self.rebootable = rebootable
+        self.timeout = timeout
+        self.process = None
+        self.session = None
+        self.cut = False
+        self._stderr = None
+
+    def __enter__(self):
+        control = self.run_dir / "swtpm.sock"
+        log = self.run_dir / "swtpm.log"
+        self._stderr = (self.run_dir / "swtpm-stderr.log").open("xb")
+        command = [self.swtpm, "socket", "--tpm2", "--tpmstate", f"dir={self.tpm_dir}",
+                   "--ctrl", f"type=unixio,path={control}",
+                   "--log", f"file={log}", "--terminate"]
+        self.process = subprocess.Popen(command, stdout=self._stderr,
+                                        stderr=subprocess.STDOUT,
+                                        preexec_fn=device.die_with_parent)
+        try:
+            deadline = time.monotonic() + 20
+            while not control.exists():
+                if self.process.poll() is not None:
+                    raise SafetyError(f"swtpm exited before accepting control "
+                                      f"(rc={self.process.returncode}); see {log.name}")
+                if time.monotonic() > deadline:
+                    raise SafetyError("swtpm did not open its control socket")
+                time.sleep(0.1)
+            time.sleep(0.2)  # settle listen() before QEMU connects
+            self.session = device.start_vm(
+                self.run_dir, "qemu-boot", flash=self.flash, disk=self.disk,
+                serial=self.serial, kvm=self.kvm, tpm=control,
+                rebootable=self.rebootable, timeout=self.timeout)
+        except BaseException:
+            self._stop_swtpm()
+            raise
+        return self
+
+    def power_cut(self):
+        """Emulated board power loss: both processes die without cleanup."""
+        self.cut = True
+        self.session.kill()
+        if self.process.poll() is None:
+            self.process.kill()
+        self.process.wait(timeout=30)
+
+    def _stop_swtpm(self):
+        if self.process is None:
+            return
+        try:
+            self.process.wait(timeout=SWTPM_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            self.process.terminate()
+            self.process.wait(timeout=10)
+            raise SafetyError("swtpm did not exit after QEMU disconnected")
+        allowed = (0, -9) if self.cut else (0, None)
+        if self.process.returncode not in allowed:
+            raise SafetyError(f"swtpm exited with rc={self.process.returncode}; "
+                              f"see swtpm.log")
+        if self._stderr is not None and not self._stderr.closed:
+            self._stderr.close()
+
+    def __exit__(self, *exception):
+        if self.session is not None:
+            self.session.close()
+        self._stop_swtpm()
+        return False
+
+
+def _finish_session(prepared, run_dir, serial_text, record, session):
+    """Shared post-session evidence: flash confinement and identity update."""
+    layout = prepared["layout"]
+    flash = prepared["flash"]
+    confinement = firmware_layout.write_confinement(
+        prepared["pristine"], flash.read_bytes(), layout)
+    record.update({
+        "smmstore_sha256_after": area_digest(flash.read_bytes(), layout,
+                                             firmware_layout.VARIABLE_STORE_AREA),
+        "tpm_sha256_after": tpm_digests(prepared["tpm_dir"]),
+        "disk_sha256": sha256(prepared["disk"]),
+        "flash_write_confinement": confinement,
+        "qemu_sha256": prepared["pins"]["qemu-system-x86_64"]["sha256"],
+        "swtpm_sha256": prepared["pins"]["swtpm"]["sha256"],
+        "menu_unstick_keypresses": session.keypresses,
+        "tpm_console_lines": [line.strip()[:200] for line in serial_text.splitlines()
+                              if TPM_CONSOLE_PATTERN.search(line)][:40],
+        "qmp_control": "unix:" + (run_dir / "qemu-boot.qmp.sock").name,
+    })
+    if not record["tpm_sha256_after"]:
+        raise SafetyError("The session persisted no swtpm state")
+    return record
+
+
+def _session_scope(extra):
+    return extra + " (development trust domain; fresh QEMU and swtpm processes " \
+                   "over the same disk/flash/TPM state)"
+
+
+def _record_failure(prepared, run_dir, op, error, session, session_ran):
+    """Fail honestly: record what a failed session did to persistent state.
+
+    A session that actually ran the machine may have legitimately written
+    flash/TPM state (guest execution) before the harness failed. The observed
+    identity is adopted as the new baseline with an explicit failed-operation
+    record, so later sessions assert continuity from what actually happened
+    instead of blocking forever on a stale baseline. Failures before the
+    machine powered on record only the error.
+    """
+    profile = prepared["profile"]
+    if session_ran:
+        record = {
+            "op": op, "run": int(run_dir.name), "passed": False,
+            "error": str(error)[:500],
+            "smmstore_sha256_after": area_digest(
+                prepared["flash"].read_bytes(), prepared["layout"],
+                firmware_layout.VARIABLE_STORE_AREA),
+            "tpm_sha256_after": tpm_digests(prepared["tpm_dir"]),
+            "menu_unstick_keypresses": getattr(session, "keypresses", None),
+            "scope": "Failed session; observed state adopted as the new baseline",
+        }
+        save_json(run_dir / "run.json", record)
+        profile["boots"] = profile.get("boots", 0) + 1
+        profile["state_after_last_boot"] = {
+            "smmstore_sha256": record["smmstore_sha256_after"],
+            "tpm_sha256": record["tpm_sha256_after"]}
+        record_operation(profile, op, run=int(run_dir.name), failed=True,
+                         error=str(error)[:200])
+    profile["last_error"] = str(error)
+    save_json(prepared["target"] / "profile.json", profile)
+
+
+def boot(root, name, *, count=2):
+    """Cold-start the persistent profile; verify boot, writes and identity."""
+    if not 1 <= count <= MAX_BOOT_RUNS:
+        raise SafetyError(f"Boot count must be within 1..{MAX_BOOT_RUNS}")
+    prepared = _prepare(root, name)
+    profile = prepared["profile"]
+    layout = prepared["layout"]
+    flash, tpm_dir, runs_dir = prepared["flash"], prepared["tpm_dir"], prepared["runs_dir"]
+    _assert_session_started_from_expected_state(prepared)
     kvm = os.access("/dev/kvm", os.R_OK | os.W_OK)
     first_ever_boot = profile.get("boots", 0) == 0
     records = []
     try:
         for offset in range(count):
-            number = profile["boots"] + 1
-            run_dir = runs_dir / f"{number:04d}"
+            run_dir = next_run(runs_dir)
             run_dir.mkdir(mode=0o700)
-            smm_before = area_digest(flash.read_bytes(), layout, firmware_layout.VARIABLE_STORE_AREA)
+            number = int(run_dir.name)
+            smm_before = area_digest(flash.read_bytes(), layout,
+                                     firmware_layout.VARIABLE_STORE_AREA)
             tpm_before = tpm_digests(tpm_dir)
             if records:
                 assert_identity_unchanged(records[-1]["smmstore_sha256_after"], smm_before,
@@ -205,86 +417,354 @@ def boot(root, name, *, count=2):
                 assert_identity_unchanged(records[-1]["tpm_sha256_after"], tpm_before,
                                           "TPM state")
             serial = run_dir / "serial.log"
-            record = _cold_start(run_dir, qemu, swtpm, flash, disk, tpm_dir, serial, kvm)
-            text = serial.read_text(errors="replace")
-            markers, denial = device.boot_verdict(text)
-            tpm_ok = device.TPM_TIS_MARKER in text and device.TPM_TIS_MISSING_MARKER not in text
-            if not markers[device.REQUIRED_MARKER] or denial["denial"]:
-                raise SafetyError(f"Cold start {number} did not reach the verified "
-                                  "read-only sysroot terminal marker")
-            if not tpm_ok:
-                raise SafetyError(f"Cold start {number} did not bind a TPM 2.0 device "
-                                  f"through ACPI/TIS (no {device.TPM_TIS_MARKER!r} marker)")
-            confinement = firmware_layout.write_confinement(
-                pristine, flash.read_bytes(), layout)
-            smm_after = area_digest(flash.read_bytes(), layout, firmware_layout.VARIABLE_STORE_AREA)
-            tpm_after = tpm_digests(tpm_dir)
-            if not tpm_after:
-                raise SafetyError(f"Cold start {number} persisted no swtpm state")
-            if first_ever_boot and offset == 0 and smm_after == area_digest(
-                    pristine, layout, firmware_layout.VARIABLE_STORE_AREA):
+            machine = Machine(run_dir, prepared["qemu"], prepared["swtpm"], flash,
+                              prepared["disk"], tpm_dir, serial, kvm=kvm)
+            session_ran = False
+            try:
+                with machine:
+                    session_ran = True
+                    machine.session.wait_until(lambda text: device.REQUIRED_MARKER in text
+                                               or device.DENIAL_MARKER.search(text))
+                    machine.session.quit()
+                    text = serial.read_text(errors="replace")
+            except Exception as error:
+                _record_failure(prepared, run_dir, "boot", error,
+                                machine.session, session_ran)
+                raise
+            markers, denial = _assert_boot_markers(text, f"Cold start {number}")
+            smm_after = area_digest(flash.read_bytes(), layout,
+                                    firmware_layout.VARIABLE_STORE_AREA)
+            if first_ever_boot and offset == 0 and smm_after == prepared["pristine_store_sha256"]:
                 raise SafetyError("First boot of the profile left the variable store "
                                   "identical to the erased pristine image")
-            record.update({
-                "run": number, "cold_start": True, "kvm": kvm, "markers": markers,
-                "denial": denial, "tpm_tis_acpi_bound": True,
-                "tpm_console_lines": [line.strip()[:200] for line in text.splitlines()
-                                      if TPM_CONSOLE_PATTERN.search(line)][:40],
-                "smmstore_sha256_before": smm_before, "smmstore_sha256_after": smm_after,
-                "tpm_sha256_before": tpm_before, "tpm_sha256_after": tpm_after,
-                "tpm_state_changed_in_boot": tpm_before != tpm_after,
-                "disk_sha256": sha256(disk),
-                "flash_write_confinement": confinement,
-                "qemu_sha256": pins["qemu-system-x86_64"]["sha256"],
-                "swtpm_sha256": pins["swtpm"]["sha256"],
-                "scope": "One cold start of the persistent profile; fresh QEMU and "
-                         "swtpm processes over the same disk/flash/TPM state",
-            })
+            record = {
+                "op": "boot", "run": number, "cold_start": True, "kvm": kvm,
+                "markers": markers, "denial": denial, "tpm_tis_acpi_bound": True,
+                "smmstore_sha256_before": smm_before,
+                "tpm_sha256_before": tpm_before,
+                "scope": _session_scope("Cold start of the persistent profile"),
+            }
+            _finish_session(prepared, run_dir, text, record, machine.session)
+            record["tpm_state_changed_in_boot"] = tpm_before != record["tpm_sha256_after"]
             records.append(record)
             profile["boots"] = number
             profile["state_after_last_boot"] = {
-                "smmstore_sha256": smm_after, "tpm_sha256": tpm_after}
-            save_json(target / "profile.json", profile)
+                "smmstore_sha256": record["smmstore_sha256_after"],
+                "tpm_sha256": record["tpm_sha256_after"]}
+            record_operation(profile, "boot", run=number)
+            save_json(prepared["target"] / "profile.json", profile)
             write_json(run_dir / "run.json", record)
     except Exception as error:
         profile["last_error"] = str(error)
-        save_json(target / "profile.json", profile)
+        save_json(prepared["target"] / "profile.json", profile)
         raise
     return {"passed": True, "name": name, "boots": [record["run"] for record in records],
-            "identity": profile["state_after_last_boot"], "evidence": str(target),
+            "identity": profile["state_after_last_boot"], "evidence": str(prepared["target"]),
             "scope": "Persistent cold-start boots with flash/TPM identity continuity "
                      "(development trust domain)"}
 
 
-def _cold_start(run_dir, qemu, swtpm, flash, disk, tpm_dir, serial, kvm):
-    """Boot once: fresh QEMU plus one swtpm instance over persistent state."""
-    control = run_dir / "swtpm.sock"
-    log = run_dir / "swtpm.log"
-    command = [swtpm, "socket", "--tpm2", "--tpmstate", f"dir={tpm_dir}",
-               "--ctrl", f"type=unixio,path={control}",
-               "--log", f"file={log}", "--terminate"]
-    with (run_dir / "swtpm-stderr.log").open("wb") as error_stream:
-        process = subprocess.Popen(command, stdout=error_stream, stderr=subprocess.STDOUT)
-        try:
-            deadline = time.monotonic() + 20
-            while not control.exists():
-                if process.poll() is not None:
-                    raise SafetyError(f"swtpm exited before accepting control "
-                                      f"(rc={process.returncode}); see {log.name}")
-                if time.monotonic() > deadline:
-                    raise SafetyError("swtpm did not open its control socket")
-                time.sleep(0.1)
-            time.sleep(0.2)  # settle listen() before QEMU connects
-            builder.logged(run_dir, "qemu-boot", device.qemu_command(
-                flash, disk, serial, kvm=kvm, tpm=control), timeout=1800)
-        finally:
-            try:
-                process.wait(timeout=SWTPM_TIMEOUT)
-            except subprocess.TimeoutExpired:
-                process.terminate()
-                process.wait(timeout=10)
-                raise SafetyError("swtpm did not exit after QEMU disconnected")
-            if process.returncode not in (0, None):
-                raise SafetyError(f"swtpm exited with rc={process.returncode}; "
-                                  f"see {log.name}")
-    return {"swtpm_state_dir": tpm_dir.name, "swtpm_control": "unixio"}
+def reboot(root, name, *, resets=2):
+    """Warm-reset the running machine in place; flash and TPM stay powered.
+
+    One QEMU process and one swtpm process serve the whole session: every
+    QMP system_reset re-enters the firmware with the variable store and TPM
+    state carried over, exactly like a warm reset of real hardware. The
+    session ends with a full verified boot; a reset that silently restored
+    pristine NVRAM or wiped TPM state fails closed.
+    """
+    if not 1 <= resets <= MAX_RESETS:
+        raise SafetyError(f"Reset count must be within 1..{MAX_RESETS}")
+    prepared = _prepare(root, name)
+    profile = prepared["profile"]
+    layout = prepared["layout"]
+    flash, tpm_dir, runs_dir = prepared["flash"], prepared["tpm_dir"], prepared["runs_dir"]
+    _assert_session_started_from_expected_state(prepared)
+    kvm = os.access("/dev/kvm", os.R_OK | os.W_OK)
+    run_dir = next_run(runs_dir)
+    run_dir.mkdir(mode=0o700)
+    smm_before = area_digest(flash.read_bytes(), layout, firmware_layout.VARIABLE_STORE_AREA)
+    tpm_before = tpm_digests(tpm_dir)
+    serial = run_dir / "serial.log"
+    machine = Machine(run_dir, prepared["qemu"], prepared["swtpm"], flash,
+                      prepared["disk"], tpm_dir, serial, kvm=kvm,
+                      rebootable=True)
+    session_ran = False
+    try:
+        with machine:
+            session_ran = True
+            session = machine.session
+            text = ""
+            for cycle in range(resets + 1):
+                # The dev unit prints the terminal marker twice per boot.
+                needed = 2 * (cycle + 1)
+                text = session.wait_until(
+                    lambda seen, needed=needed: seen.count(device.REQUIRED_MARKER) >= needed
+                    or bool(device.DENIAL_MARKER.search(seen)))
+                if device.DENIAL_MARKER.search(text):
+                    raise SafetyError(f"Reboot cycle {cycle + 1} hit a verity denial")
+                if text.count(device.REQUIRED_MARKER) < needed:
+                    raise SafetyError(f"Reboot cycle {cycle + 1} did not reach the "
+                                      f"verified sysroot marker (machine left early)")
+                if cycle < resets:
+                    session.reset()
+            session.quit()
+            text = serial.read_text(errors="replace")
+        markers, denial = _assert_boot_markers(text, "Reboot session")
+        boots_in_session = resets + 1
+        if text.count(device.REQUIRED_MARKER) < 2 * boots_in_session \
+                or text.count(device.TPM_TIS_MARKER) < boots_in_session:
+            raise SafetyError("Reboot session lost full boot evidence across resets")
+        record = {
+            "op": "reboot", "run": int(run_dir.name), "kvm": kvm, "resets": resets,
+            "boots_in_session": boots_in_session,
+            "marker_prints": text.count(device.REQUIRED_MARKER),
+            "tpm_tis_marker_prints": text.count(device.TPM_TIS_MARKER),
+            "markers": markers, "denial": denial,
+            "smmstore_sha256_before": smm_before,
+            "tpm_sha256_before": tpm_before,
+            "scope": _session_scope("Warm-reset loop in one powered session"),
+        }
+        _finish_session(prepared, run_dir, text, record, machine.session)
+        if record["smmstore_sha256_after"] == prepared["pristine_store_sha256"]:
+            raise SafetyError("Warm resets restored the variable store to the erased "
+                              "pristine image (silent NVRAM reset)")
+        if not record["tpm_sha256_after"]:
+            raise SafetyError("Warm resets left no TPM state")
+        write_json(run_dir / "run.json", record)
+        profile["boots"] = profile.get("boots", 0) + 1
+        profile["state_after_last_boot"] = {
+            "smmstore_sha256": record["smmstore_sha256_after"],
+            "tpm_sha256": record["tpm_sha256_after"]}
+        record_operation(profile, "reboot", run=int(run_dir.name), resets=resets)
+        save_json(prepared["target"] / "profile.json", profile)
+    except Exception as error:
+        _record_failure(prepared, run_dir, "reboot", error, machine.session, session_ran)
+        raise
+    return {"passed": True, "name": name, "resets": resets,
+            "boots_in_session": resets + 1, "identity": profile["state_after_last_boot"],
+            "evidence": str(run_dir), "scope": record["scope"]}
+
+
+def stop(root, name):
+    """Boot to the verified marker, then stop the machine via QMP powerdown.
+
+    The power-down request is the ACPI power button; whether the appliance
+    honors it (exit well before the dev unit's own fallback poweroff) is
+    recorded as evidence, not assumed.
+    """
+    prepared = _prepare(root, name)
+    profile = prepared["profile"]
+    runs_dir = prepared["runs_dir"]
+    _assert_session_started_from_expected_state(prepared)
+    kvm = os.access("/dev/kvm", os.R_OK | os.W_OK)
+    run_dir = next_run(runs_dir)
+    run_dir.mkdir(mode=0o700)
+    serial = run_dir / "serial.log"
+    machine = Machine(run_dir, prepared["qemu"], prepared["swtpm"], prepared["flash"],
+                      prepared["disk"], prepared["tpm_dir"], serial, kvm=kvm)
+    session_ran = False
+    try:
+        with machine:
+            session_ran = True
+            machine.session.wait_until(lambda text: device.REQUIRED_MARKER in text
+                                       or bool(device.DENIAL_MARKER.search(text)))
+            requested = machine.session.alive()
+            exit_seconds = None
+            honored = None
+            if requested:
+                # Operator power-down request (ACPI power button). Whether the
+                # appliance honors it is evidence, not an assumption: if the
+                # machine ignores the button, the harness stops it itself.
+                machine.session.powerdown()
+                started = time.monotonic()
+                deadline = started + STOP_POWERDOWN_WAIT
+                while machine.session.alive() and time.monotonic() < deadline:
+                    time.sleep(0.2)
+                exit_seconds = round(time.monotonic() - started, 1)
+                honored = not machine.session.alive()
+            returncode = machine.session.quit()
+            text = serial.read_text(errors="replace")
+        if returncode != 0:
+            raise SafetyError(f"Stopped machine left QEMU with rc={returncode}")
+        markers, denial = _assert_boot_markers(text, "Stop session")
+        record = {
+            "op": "stop", "run": int(run_dir.name), "kvm": kvm,
+            "powerdown_requested": requested, "exit_after_powerdown_seconds": exit_seconds,
+            "acpi_powerdown_honored": honored,
+            "markers": markers, "denial": denial,
+            "smmstore_sha256_before": area_digest(
+                prepared["flash"].read_bytes(), prepared["layout"],
+                firmware_layout.VARIABLE_STORE_AREA),
+            "tpm_sha256_before": tpm_digests(prepared["tpm_dir"]),
+            "scope": _session_scope("Orderly power-down over the local QMP socket"),
+        }
+        _finish_session(prepared, run_dir, text, record, machine.session)
+        write_json(run_dir / "run.json", record)
+        profile["boots"] = profile.get("boots", 0) + 1
+        profile["state_after_last_boot"] = {
+            "smmstore_sha256": record["smmstore_sha256_after"],
+            "tpm_sha256": record["tpm_sha256_after"]}
+        record_operation(profile, "stop", run=int(run_dir.name))
+        save_json(prepared["target"] / "profile.json", profile)
+    except Exception as error:
+        _record_failure(prepared, run_dir, "stop", error, machine.session, session_ran)
+        raise
+    return {"passed": True, "name": name, "run": int(run_dir.name),
+            "exit_after_powerdown_seconds": record["exit_after_powerdown_seconds"],
+            "acpi_powerdown_honored": record["acpi_powerdown_honored"],
+            "identity": profile["state_after_last_boot"], "evidence": str(run_dir),
+            "scope": record["scope"]}
+
+
+def powercut(root, name):
+    """Cut power mid-session: SIGKILL QEMU and swtpm after a verified boot.
+
+    The cut is abrupt by design (no TPM2_Shutdown, no variable-store flush);
+    the assertions afterwards are that nothing silently reset — the variable
+    store must not have reverted to the pristine image and TPM state must
+    still exist — and the next cold start must recover from whatever the cut
+    left behind.
+    """
+    prepared = _prepare(root, name)
+    profile = prepared["profile"]
+    runs_dir = prepared["runs_dir"]
+    _assert_session_started_from_expected_state(prepared)
+    if not tpm_digests(prepared["tpm_dir"]):
+        raise SafetyError("Power-cut needs a profile whose TPM state already exists")
+    kvm = os.access("/dev/kvm", os.R_OK | os.W_OK)
+    run_dir = next_run(runs_dir)
+    run_dir.mkdir(mode=0o700)
+    serial = run_dir / "serial.log"
+    smm_before = area_digest(prepared["flash"].read_bytes(), prepared["layout"],
+                             firmware_layout.VARIABLE_STORE_AREA)
+    tpm_before = tpm_digests(prepared["tpm_dir"])
+    try:
+        machine = Machine(run_dir, prepared["qemu"], prepared["swtpm"], prepared["flash"],
+                          prepared["disk"], prepared["tpm_dir"], serial, kvm=kvm)
+        session_ran = False
+        with machine:
+            session_ran = True
+            text = machine.session.wait_until(
+                lambda seen: device.REQUIRED_MARKER in seen
+                or bool(device.DENIAL_MARKER.search(seen)))
+            if device.DENIAL_MARKER.search(text) or device.REQUIRED_MARKER not in text:
+                raise SafetyError("Power cut requires a machine that booted to the "
+                                  "verified marker first")
+            # Let the machine settle into the fully booted OS, then cut power
+            # from a running system (no TPM2_Shutdown, no variable flush).
+            deadline = time.monotonic() + POWERCUT_SETTLE_SECONDS
+            while machine.session.alive() and time.monotonic() < deadline:
+                time.sleep(0.5)
+            if not machine.session.alive():
+                raise SafetyError("Machine left on its own before the power cut")
+            machine.power_cut()
+            returncode = machine.session.wait_exit(30)
+            text = serial.read_text(errors="replace")
+        if returncode != -9:
+            raise SafetyError(f"Power cut did not kill QEMU abruptly (rc={returncode})")
+        markers, denial = _assert_boot_markers(text, "Power-cut session")
+        record = {
+            "op": "powercut", "run": int(run_dir.name), "kvm": kvm,
+            "qemu_killed": True, "swtpm_killed": True,
+            "markers": markers, "denial": denial,
+            "smmstore_sha256_before": smm_before, "tpm_sha256_before": tpm_before,
+            "scope": _session_scope("Abrupt power loss after a verified boot"),
+        }
+        _finish_session(prepared, run_dir, text, record, machine.session)
+        if record["smmstore_sha256_after"] == prepared["pristine_store_sha256"]:
+            raise SafetyError("Power cut restored the variable store to the erased "
+                              "pristine image (silent NVRAM reset)")
+        if not record["tpm_sha256_after"]:
+            raise SafetyError("Power cut wiped the TPM state directory")
+        write_json(run_dir / "run.json", record)
+        # The guest legitimately ran before the cut: whatever it flushed is the
+        # new identity baseline; nothing here was reset by the harness.
+        profile["boots"] = profile.get("boots", 0) + 1
+        profile["state_after_last_boot"] = {
+            "smmstore_sha256": record["smmstore_sha256_after"],
+            "tpm_sha256": record["tpm_sha256_after"]}
+        record_operation(profile, "powercut", run=int(run_dir.name))
+        save_json(prepared["target"] / "profile.json", profile)
+    except Exception as error:
+        _record_failure(prepared, run_dir, "powercut", error, machine.session, session_ran)
+        raise
+    return {"passed": True, "name": name, "run": int(run_dir.name),
+            "identity": profile["state_after_last_boot"], "evidence": str(run_dir),
+            "scope": record["scope"]}
+
+
+def snapshot(root, name, label):
+    """Explicitly copy the whole persistent device state into a named snapshot."""
+    validate_name(label)
+    target, profile = load(root, name)
+    snapshots = target / "snapshots"
+    snap = snapshots / label
+    if snap.exists():
+        raise SafetyError(f"Snapshot {label!r} already exists for device {name!r}; "
+                          "snapshots are immutable once written")
+    snapshots.mkdir(mode=0o700)
+    snap.mkdir(mode=0o700)
+    (snap / "tpm").mkdir(mode=0o700)
+    files = {"disk.raw": sha256(regular_file(target, "disk.raw")),
+             "flash.rom": sha256(regular_file(target, "flash.rom"))}
+    shutil.copyfile(target / "disk.raw", snap / "disk.raw")
+    shutil.copyfile(target / "flash.rom", snap / "flash.rom")
+    for item in sorted((target / "tpm").iterdir()):
+        if item.is_file():
+            shutil.copyfile(item, snap / "tpm" / item.name)
+            files["tpm/" + item.name] = sha256(item)
+    manifest = {
+        "schema": 1, "label": label, "name": name,
+        "created_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "boots": profile.get("boots", 0),
+        "state_after_last_boot": profile.get("state_after_last_boot", {}),
+        "files": files,
+        "scope": "Isolated snapshot of persistent device state; restore is a "
+                 "separate explicit operation and never happens implicitly",
+    }
+    write_json(snap / "manifest.json", manifest)
+    profile.setdefault("snapshots", {})[label] = {
+        "created_utc": manifest["created_utc"], "files": files}
+    record_operation(profile, "snapshot", label=label)
+    save_json(target / "profile.json", profile)
+    return {"passed": True, "name": name, "label": label, "files": files,
+            "evidence": str(snap), "scope": manifest["scope"]}
+
+
+def restore(root, name, label):
+    """Explicitly restore persistent device state from a named snapshot.
+
+    This is the only state-restoration path, and it is always operator
+    command: ordinary boots and failed sessions never roll a device back.
+    """
+    validate_name(label)
+    target, profile = load(root, name)
+    snap = target / "snapshots" / label
+    if not snap.is_dir():
+        raise SafetyError(f"No snapshot {label!r} for device {name!r}")
+    manifest = read_json(regular_file(snap, "manifest.json"))
+    if manifest.get("schema") != 1 or manifest.get("label") != label \
+            or manifest.get("name") != name:
+        raise SafetyError("Snapshot manifest does not match this device and label")
+    for relative, digest in sorted(manifest.get("files", {}).items()):
+        if sha256(regular_file(snap, relative)) != digest:
+            raise SafetyError(f"Snapshot file {relative!r} no longer matches its "
+                              "manifest; refusing to restore corrupted state")
+    shutil.copyfile(snap / "disk.raw", target / "disk.raw")
+    shutil.copyfile(snap / "flash.rom", target / "flash.rom")
+    for item in list((target / "tpm").iterdir()):
+        if item.is_file():
+            item.unlink()
+    for relative in sorted(manifest.get("files", {})):
+        if relative.startswith("tpm/"):
+            shutil.copyfile(snap / relative, target / "tpm" / relative.split("/", 1)[1])
+    profile["boots"] = manifest.get("boots", 0)
+    profile["state_after_last_boot"] = manifest.get("state_after_last_boot", {})
+    record_operation(profile, "restore", label=label)
+    save_json(target / "profile.json", profile)
+    return {"passed": True, "name": name, "label": label,
+            "restored_boots": profile["boots"],
+            "identity": profile["state_after_last_boot"],
+            "evidence": str(snap),
+            "scope": "Persistent device state restored by explicit operator command"}

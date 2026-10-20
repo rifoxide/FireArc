@@ -65,7 +65,8 @@ Useful commands: `just status`, `just build-tools`, `just build-root`,
 `just build-rootfs`, `just check-initrd`, `just check-rootfs`, `just sbom`,
 `just firmware-sources --online`, `just firmware-build`, `just firmware-layout`,
 `just device`, `just check-boot`, `just device-provision`, `just device-boot`,
-`just prune`.
+`just device-reboot`, `just device-stop`, `just device-powercut`,
+`just device-snapshot`, `just device-restore`, `just prune`.
 
 ## Documentation
 

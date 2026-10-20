@@ -48,6 +48,20 @@ qualification. The complete secured appliance is not yet implemented.
   execution. Found and fixed on the way: a dev-unit shutdown race against
   `switch_root` (now `poweroff -f`). See
   [device-profile validation](validation/device-profile.md).
+- Explicit device lifecycle operations over a local-only QMP socket
+  (`just device-reboot`/`device-stop`/`device-powercut`/`device-snapshot`/
+  `device-restore`), closing gate G1: a warm-reset loop kept flash/TPM
+  powered through three boots in one session (markers each boot, NVRAM
+  carried and evolved); an abrupt power cut after a verified boot was
+  recovered from on the next cold start with no silent NVRAM/TPM reset; state
+  restoration happened only by explicit snapshot restore, and a failed
+  session adopts its observed identity with an explicit failed record. Two
+  real appliance findings recorded honestly: the payload intermittently
+  parks at its interactive boot menu from a pristine variable store
+  (harness sends a bounded, recorded ENTER over QMP), and the ACPI power
+  button is not handled by the minimal root (`device-stop` records it and
+  stops the machine itself). Orphaned QEMU/swtpm now die with the harness
+  (`PR_SET_PDEATHSIG`).
 - Bounded evidence retention (`just prune`): every successful stage build now
   prunes superseded evidence directories (keeps current + previous per stage),
   never touching device-profile-pinned provenance; the first run freed
@@ -63,7 +77,7 @@ qualification. The complete secured appliance is not yet implemented.
 
 ## Validation
 
-The label-free bootstrap/build/verification pipeline and 126 offline tests pass.
+The label-free bootstrap/build/verification pipeline and 137 offline tests pass.
 The fresh-clone build/verification passed, and `just reproduce --yes` completed
 two empty-cache download/build/verification rounds with **byte-identical
 payloads** (kernel, initramfs, root tar, ext4, verity tree, authority). The

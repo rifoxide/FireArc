@@ -164,6 +164,82 @@ class BootValidationTests(unittest.TestCase):
             with self.assertRaises(SafetyError):
                 profile.boot(root, "ghost", count=1)
 
+    def test_reboot_reset_count_is_bounded(self):
+        with temporary() as root:
+            for resets in (0, -1, profile.MAX_RESETS + 1):
+                with self.subTest(resets=resets), self.assertRaises(SafetyError):
+                    profile.reboot(root, "dev1", resets=resets)
+
+
+class RunNumberingTests(unittest.TestCase):
+    def test_next_run_is_monotonic(self):
+        with temporary() as work:
+            self.assertEqual(profile.next_run(work).name, "0001")
+            (work / "0001").mkdir()
+            (work / "0007").mkdir()
+            (work / "not-a-run").mkdir()
+            self.assertEqual(profile.next_run(work).name, "0008")
+
+
+class SnapshotTests(unittest.TestCase):
+    def prepared(self, root):
+        fabricate(root)
+        profile._provision(root, "dev1", DEVICE_LABEL, FIRMWARE_LABEL)
+        target = root / "build/devices/dev1"
+        (target / "tpm/tpm2-00.permall").write_bytes(b"tpm-state")
+        stored = read_json(target / "profile.json")
+        stored["boots"] = 3
+        stored["state_after_last_boot"] = {
+            "smmstore_sha256": "aa",
+            "tpm_sha256": {"tpm2-00.permall": sha256(target / "tpm/tpm2-00.permall")}}
+        profile.save_json(target / "profile.json", stored)
+        return target
+
+    def test_snapshot_then_restore_is_an_explicit_round_trip(self):
+        with temporary() as root:
+            target = self.prepared(root)
+            result = profile.snapshot(root, "dev1", "pre-chaos")
+            self.assertTrue(result["passed"])
+            snap = target / "snapshots/pre-chaos"
+            self.assertEqual(read_json(snap / "manifest.json")["boots"], 3)
+            # Diverge the live state after the snapshot.
+            (target / "tpm/tpm2-00.permall").write_bytes(b"changed-by-later-boot")
+            (target / "flash.rom").write_bytes(b"Z" * device.FIRMWARE_BYTES)
+            restored = profile.restore(root, "dev1", "pre-chaos")
+            self.assertEqual(restored["restored_boots"], 3)
+            self.assertEqual((target / "tpm/tpm2-00.permall").read_bytes(), b"tpm-state")
+            stored = read_json(target / "profile.json")
+            self.assertEqual(stored["boots"], 3)
+            self.assertEqual(stored["state_after_last_boot"]["smmstore_sha256"], "aa")
+            self.assertEqual([entry["op"] for entry in stored["operations"]],
+                             ["provision", "snapshot", "restore"])
+            self.assertIn("pre-chaos", stored["snapshots"])
+
+    def test_snapshots_are_immutable_and_labels_validated(self):
+        with temporary() as root:
+            target = self.prepared(root)
+            profile.snapshot(root, "dev1", "one")
+            with self.assertRaises(SafetyError) as raised:
+                profile.snapshot(root, "dev1", "one")
+            self.assertIn("immutable", str(raised.exception))
+            for bad in ("../esc", "Two", ""):
+                with self.subTest(label=bad), self.assertRaises(SafetyError):
+                    profile.snapshot(root, "dev1", bad)
+
+    def test_restore_rejects_unknown_or_corrupt_snapshots(self):
+        with temporary() as root:
+            target = self.prepared(root)
+            with self.assertRaises(SafetyError):
+                profile.restore(root, "dev1", "ghost")
+            profile.snapshot(root, "dev1", "good")
+            (target / "tpm/tpm2-00.permall").write_bytes(b"diverged")
+            (target / "snapshots/good/tpm/tpm2-00.permall").write_bytes(b"corrupted")
+            with self.assertRaises(SafetyError) as raised:
+                profile.restore(root, "dev1", "good")
+            self.assertIn("corrupted", str(raised.exception))
+            # The live state must be untouched by the refused restore.
+            self.assertEqual((target / "tpm/tpm2-00.permall").read_bytes(), b"diverged")
+
 
 class HarnessWiringTests(unittest.TestCase):
     def test_qemu_command_attaches_exactly_one_tis_tpm(self):
@@ -174,6 +250,21 @@ class HarnessWiringTests(unittest.TestCase):
         self.assertIn("-device tpm-tis,tpmdev=tpm0", joined)
         self.assertEqual(command.count("-tpmdev"), 1)
         self.assertNotIn("tpm-tis", " ".join(device.qemu_command("/f", "/d", "/s", kvm=True)))
+
+    def test_qemu_command_exposes_local_qmp_and_reboot_control(self):
+        command = device.qemu_command("/f", "/d", "/s", kvm=True,
+                                      qmp_socket=Path("/run/qmp.sock"))
+        joined = " ".join(command)
+        self.assertIn("-qmp unix:/run/qmp.sock,server,nowait", joined)
+        self.assertNotIn("tcp", joined)
+        self.assertIn("-no-reboot", joined)
+        rebootable = device.qemu_command("/f", "/d", "/s", kvm=True,
+                                         qmp_socket=Path("/run/qmp.sock"), rebootable=True)
+        self.assertNotIn("-no-reboot", rebootable)
+
+    def test_dev_unit_graces_before_poweroff(self):
+        self.assertIn(f"sleep {device.GRACE_SECONDS}", device.DEV_UNIT)
+        self.assertIn("poweroff -f", device.DEV_UNIT)
 
     def test_dev_unit_reports_tis_acpi_binding(self):
         self.assertIn("FIREARC_TPM_TIS_OK", device.DEV_UNIT)
