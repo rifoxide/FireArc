@@ -14,7 +14,7 @@ import sys
 import tarfile
 import uuid
 
-from . import builder, device, firmware, firmware_build, firmware_layout, initrd, rootfs, sbom
+from . import builder, device, firmware, firmware_build, firmware_layout, initrd, rootfs, sbom, uki
 from .inputs import validate_locks
 from .integrity import SafetyError, private_directory, read_json, regular_file, sha256, verify_file, write_json
 
@@ -26,7 +26,8 @@ DEPENDENCIES = {
     "firmware-sources": (),
     "firmware-build": ("firmware-sources",),
     "firmware-layout": ("firmware-build",),
-    "device": ("tools", "root", "rootfs"), "check-boot": ("tools", "device", "firmware-build"),
+    "uki": ("tools", "root", "rootfs"),
+    "device": ("tools", "root", "rootfs", "uki"), "check-boot": ("tools", "device", "firmware-build"),
 }
 
 
@@ -271,8 +272,12 @@ class Pipeline:
         if stage == "firmware-layout":
             firmware_layout.inspect(root, deps["firmware-build"]["id"], build_id)
             return self.build / "firmware-layout" / build_id, {}
+        if stage == "uki":
+            uki.build(root, deps["tools"]["id"], deps["root"]["id"], deps["rootfs"]["id"], build_id)
+            return self.build / "images" / build_id, {}
         if stage == "device":
-            device.assemble(root, deps["tools"]["id"], deps["root"]["id"], deps["rootfs"]["id"], build_id)
+            device.assemble(root, deps["tools"]["id"], deps["root"]["id"], deps["rootfs"]["id"],
+                            deps["uki"]["id"], build_id)
             return self.build / "images" / build_id, {}
         if stage == "check-boot":
             device.check_boot(root, deps["tools"]["id"], deps["device"]["id"],
@@ -330,6 +335,7 @@ class Pipeline:
     def publish(self):
         root = self.ensure("root")
         filesystem = self.ensure("rootfs")
+        image = self.ensure("uki")
         inventory = self.ensure("sbom")
         root_output = self.build / "images" / root["id"] / "output"
         fs_output = self.build / "images" / filesystem["id"] / "output"
@@ -337,6 +343,7 @@ class Pipeline:
         outputs = {"root.tar": root_output / "firearc-root.tar", "kernel.efi": root_output / "firearc-root.vmlinuz",
                    "initrd.img": root_output / "firearc-initrd.img", "root.ext4": fs_output / fs_result["root_payload"],
                    "root.verity": fs_output / "root.verity", "verity-authority.json": fs_output / "verity-authority.json",
+                   "uki-a.efi": self.build / "images" / image["id"] / "output" / device.UKI_ARTIFACT,
                    "sbom.json": builder.parent(self.root) / inventory["id"] / "output" / "sbom.json"}
         directory = private_directory(self.build / "output", create=True)
         for name, source in outputs.items():
@@ -364,6 +371,7 @@ def run(root, command, *, online=False):
         elif command == "firmware-sources": pipeline.ensure("firmware-sources")
         elif command == "firmware-build": pipeline.ensure("firmware-build")
         elif command == "firmware-layout": pipeline.ensure("firmware-layout")
+        elif command == "uki": pipeline.ensure("uki")
         elif command == "device": pipeline.ensure("device")
         elif command == "check-boot": pipeline.ensure("check-boot")
         elif command == "check-initrd": pipeline.ensure("check-initrd")
@@ -395,7 +403,8 @@ def reproduce(root, *, confirmed=False):
         identical = rounds[0]["outputs"] == rounds[1]["outputs"]
         report = {"schema": 1, "passed": identical, "clean_download_build_rounds": rounds,
                   "source_fingerprint": initial, "host_python": sys.version,
-                  "scope": "Root/kernel/initramfs/ext4/verity payloads only; firmware/signing/device lifecycle pending",
+                  "scope": "Root/kernel/initramfs/ext4/verity payloads and the unsigned UKI; "
+                           "firmware signing/device lifecycle pending",
                   "shared_docker_content_cache_preserved": True}
         write_json(root / "build/reproducibility.json", report)
         if not identical:

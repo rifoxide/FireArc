@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
-from firearc import pipeline
+from firearc import device, pipeline
 from firearc.integrity import SafetyError, read_json, sha256, write_json
 from support import temporary
 
@@ -70,7 +70,7 @@ class FakePipeline(pipeline.Pipeline):
         else:
             output = work / "output"
             output.mkdir()
-            names = ["firearc-root.tar", "firearc-root.vmlinuz", "firearc-initrd.img"] if stage == "root" else ["root.ext4", "root.verity", "verity-authority.json"] if stage == "rootfs" else []
+            names = ["firearc-root.tar", "firearc-root.vmlinuz", "firearc-initrd.img"] if stage == "root" else ["root.ext4", "root.verity", "verity-authority.json"] if stage == "rootfs" else [device.UKI_ARTIFACT] if stage == "uki" else []
             for name in names:
                 (output / name).write_text(name)
             write_json(work / "result.json", {"passed": True, "artifacts": {name: sha256(output / name) for name in names}, "root_payload": "root.ext4"})
@@ -112,7 +112,7 @@ class PipelineTests(unittest.TestCase):
             first = FakePipeline(root, online=True)
             record = first.ensure("check-boot")
             self.assertEqual(first.calls, ["metadata", "packages-tools", "tools", "packages-root",
-                                            "root", "rootfs", "device", "firmware-sources",
+                                            "root", "rootfs", "uki", "device", "firmware-sources",
                                             "firmware-build", "check-boot"])
             self.assertIn("check-boot-", record["id"])
             second = FakePipeline(root)
@@ -157,7 +157,7 @@ class PipelineTests(unittest.TestCase):
             self.workspace(root)
             build = FakePipeline(root, online=True)
             outputs = build.publish()
-            self.assertEqual(set(outputs), {"kernel.efi", "initrd.img", "root.tar", "root.ext4", "root.verity", "verity-authority.json", "sbom.json"})
+            self.assertEqual(set(outputs), {"kernel.efi", "initrd.img", "root.tar", "root.ext4", "root.verity", "verity-authority.json", "uki-a.efi", "sbom.json"})
             self.assertTrue((root / "build/output/root.ext4").is_symlink())
             (root / "build/output/root.ext4").unlink()
             (root / "build/output/root.ext4").write_text("keep")

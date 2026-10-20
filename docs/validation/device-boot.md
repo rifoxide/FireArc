@@ -48,6 +48,14 @@ differ from the pristine ROM only inside the SMMSTORE variable region
 OVMF fixture and with the self-built coreboot/EDK II firmware. Three
 corruption disciplines on the same disk and firmware:
 
+**ESP layout (2026-10-20, UKI re-qualification):** the device ESP now boots
+one Unified Kernel Image — systemd-boot plus `EFI/Linux/firearc-a.efi`
+(type-2 auto-entry; no separate kernel, initramfs or loader entry file).
+The kernel, command line, verity authority and development unit all ride
+inside the UKI built by `just uki` (byte-identical rebuild, every payload
+section verified against its input). All three disciplines below re-passed
+unchanged on this layout.
+
 - **Positive boot:** full 4 GiB verity preverification, dm-verity mapping,
   read-only ext4 sysroot mount, the self-verified terminal marker, and —
   after dropping caches — a clean full re-read of the verity device

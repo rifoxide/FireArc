@@ -83,6 +83,10 @@ device-restore *options:
 prune *options:
     python3 -B scripts/firearc.py prune "$@"
 
+# Build the unsigned slot-A UKI from the frozen payloads (pinned ukify).
+uki *options:
+    python3 -B scripts/firearc.py uki "$@"
+
 # Assemble the unsigned development installed-device disk (ESP + slot A).
 device *options:
     python3 -B scripts/firearc.py device "$@"

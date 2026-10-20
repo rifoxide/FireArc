@@ -99,6 +99,20 @@ qualification. The complete secured appliance is not yet implemented.
   and the deferral of Phases 5–13 until the chain is complete; Phases 14–19
   remain post-qualification product work. Every phase heading in PLAN.md
   carries its ACTIVE/DEFERRED/LATER disposition accordingly.
+- Unsigned slot-A **Unified Kernel Image** built and boot-qualified (PLAN
+  Phase 3 item 11, Phase 4 items 3–4; `just uki`): the pinned ukify
+  (tools image) combines the root archive's own linuxx64.efi stub and
+  os-release with the frozen kernel, dracut initramfs and an appended cpio
+  carrying the verity authority and dev unit — one systemd version (257.13)
+  across loader, stub and ukify. In-stage evidence: UKI built twice and
+  byte-identical, every payload section (.osrel/.cmdline/.uname/.linux/
+  .initrd) verified against its exact input file, `rauc.slot=A` embedded.
+  The device ESP now carries only systemd-boot + `EFI/Linux/firearc-a.efi`
+  (type-2 entry; no separate kernel/initramfs), and the full three-discipline
+  check-boot gate re-passed on the UKI: good boot + clean runtime re-read,
+  preverify denial at the exact flipped offset, mid-session post-mapping
+  corruption → dm-verity EIO. `just build` publishes `uki-a.efi`; unsigned —
+  signing and Secure Boot enrollment are the next chain links.
 - Bounded evidence retention (`just prune`): every successful stage build now
   prunes superseded evidence directories (keeps current + previous per stage),
   never touching device-profile-pinned provenance; the first run freed
@@ -138,7 +152,6 @@ byte-reproducibility result is implied by the implementation list above.
    authenticated variables and unique TPM ACPI/event-log ownership.
 3. Implement installed A/B storage, TPM-bound LUKS2/escrow, RAUC activation/health/
    rollback, attestation, restricted recovery and release hardening/CI.
-
 G0/G1/G3 and later acceptance gates remain open. Hardware, legal review,
 production signing custody and external design documents are still dependencies.
 Git commit signing is temporarily deferred under ADR 0004; boot/update/release

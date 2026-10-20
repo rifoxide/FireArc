@@ -106,15 +106,18 @@ class DeviceTests(unittest.TestCase):
         self.assertEqual(device.HASH_OFFSET, device.ROOT_OFFSET + 4 * 1024**3)
         self.assertEqual(len({row[4] for row in device.PARTITIONS}), 3)
 
-    def test_boot_entry_and_loader_configuration(self):
+    def test_kernel_cmdline_and_loader_configuration(self):
         self.assertIn("rauc.slot=A", device.KERNEL_CMDLINE)
         self.assertIn("rd.emergency=poweroff", device.KERNEL_CMDLINE)
         for forbidden in ("rd.shell=1", "rw", "init=", "rd.break", "systemd.unit="):
             self.assertNotIn(forbidden + " ", device.KERNEL_CMDLINE + " ")
         self.assertIn("console=ttyS0,115200", device.KERNEL_CMDLINE)
-        self.assertIn("options " + device.KERNEL_CMDLINE + "\n", device.BOOT_ENTRY)
-        self.assertIn("initrd  /firearc/initrd.img", device.BOOT_ENTRY)
         self.assertEqual(device.LOADER_CONF, "timeout 0\ndefault firearc-a\neditor no\n")
+        # The ESP carries no separate kernel/initramfs: the whole boot payload
+        # is the UKI, discovered by systemd-boot as a type-2 auto-entry.
+        self.assertEqual(device.ESP_UKI_PATH, "EFI/Linux/firearc-a.efi")
+        self.assertEqual(device.UKI_ARTIFACT, "firearc-uki-a.efi")
+        self.assertFalse(hasattr(device, "BOOT_ENTRY"))
 
     def test_qemu_command_shape(self):
         command = device.qemu_command("/run/flash.rom", "/disks/dev.raw", "/run/s.log", kvm=False)

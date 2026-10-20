@@ -1,16 +1,21 @@
 """Development installed-device profile and QEMU Q35 boot verification.
 
 Assembles an unsigned development disk (GPT ESP + FIREARC_ROOT_A/FIREARC_HASH_A)
-from the frozen OS payloads, boots it under the pinned host QEMU with the
-self-built coreboot/EDK II firmware and asserts the initrd integrity gate
-outcome on the serial console, including a corrupted-root negative control.
-Each booted flash copy must also differ from the pristine ROM only inside the
-SMMSTORE variable region: guest firmware writes may never touch code,
-flash-map, preserved or unmapped bytes. The firmware image is the monolithic 8 MiB ROM from the firmware-build stage;
-its SMMSTORE region carries the writable UEFI variable store, so each run
-boots a private writable copy of the ROM. This is a development harness
-profile: it is not Secure Boot, not the production provisioning layout and
-not a signing or physical-device qualification.
+from the frozen OS payloads and the unsigned slot-A UKI, boots it under the
+pinned host QEMU with the self-built coreboot/EDK II firmware and asserts
+the initrd integrity gate outcome on the serial console, including a
+corrupted-root negative control. The ESP carries systemd-boot plus one
+Unified Kernel Image as a type-2 loader entry; the kernel, command line,
+verity authority and development unit all ride inside the UKI, so the ESP
+holds no separate kernel or initramfs. Each booted flash copy must also
+differ from the pristine ROM only inside the SMMSTORE variable region:
+guest firmware writes may never touch code, flash-map, preserved or
+unmapped bytes. The firmware image is the monolithic 8 MiB ROM from the
+firmware-build stage; its SMMSTORE region carries the writable UEFI
+variable store, so each run boots a private writable copy of the ROM.
+This is a development harness profile: it is not Secure Boot, not the
+production provisioning layout and not a signing or physical-device
+qualification.
 """
 
 import os
@@ -50,6 +55,13 @@ PARTITIONS = (
 
 KERNEL_CMDLINE = ("root=/dev/mapper/firearc-root rootfstype=ext4 rootflags=ro,noload ro "
                   "rauc.slot=A rd.shell=0 rd.emergency=poweroff console=ttyS0,115200")
+
+# The unsigned slot-A Unified Kernel Image (built by the uki stage) and its
+# systemd-boot type-2 auto-entry location on the ESP. The kernel, command
+# line, verity authority and development unit live inside the UKI, not as
+# separate ESP files.
+UKI_ARTIFACT = "firearc-uki-a.efi"
+ESP_UKI_PATH = "EFI/Linux/firearc-a.efi"
 
 # After its markers the unit waits this many seconds — the harness's window
 # to corrupt the disk mid-session for the runtime verity test — then drops
@@ -104,11 +116,9 @@ ExecStart=/bin/sh -c 'echo FIREARC_TPM_DEBUG_CLASS=$(ls /sys/class 2>/dev/null |
 
 LOADER_CONF = "timeout 0\ndefault firearc-a\neditor no\n"
 
-BOOT_ENTRY = f"""title   FireArc development slot A
-linux   /firearc/vmlinuz
-initrd  /firearc/initrd.img
-options {KERNEL_CMDLINE}
-"""
+# With one UKI under EFI/Linux and timeout 0, systemd-boot boots the single
+# type-2 entry automatically; the entry's kernel command line comes from the
+# UKI's embedded .cmdline section, not from a loader entry file.
 
 POSITIVE_MARKERS = ("FIREARC_VERITY_PREVERIFY_OK", "FIREARC_VERITY_MAPPING_READY",
                     "Mounted sysroot.mount", "FIREARC_DEV_BOOT_OK")
@@ -408,15 +418,19 @@ def _stage_outputs(root, label, expected, parent=None):
     return source, output, result
 
 
-def assemble(root, tools_label, root_label, rootfs_label, label):
-    """Build the unsigned development disk from the frozen payloads."""
+def assemble(root, tools_label, root_label, rootfs_label, uki_label, label):
+    """Build the unsigned development disk from the frozen payloads and UKI."""
     builder.verify_tools(root, tools_label)
     root_source, root_output, root_result = _stage_outputs(root, root_label, "appliance-root")
     payload_source, payload_output, payload_result = _stage_outputs(root, rootfs_label, "rootfs")
     if not payload_result.get("full_verity_verified"):
         raise SafetyError("Expected verified verity payloads for device assembly")
-    kernel = regular_file(root_output, "firearc-root.vmlinuz")
-    initrd = regular_file(root_output, "firearc-initrd.img")
+    uki_source, uki_output, uki_result = _stage_outputs(root, uki_label, "uki")
+    uki = regular_file(uki_output, UKI_ARTIFACT)
+    if uki_result.get("artifacts", {}).get(UKI_ARTIFACT) != sha256(uki):
+        raise SafetyError("UKI stage does not vouch for the UKI artifact")
+    if not uki_result.get("byte_identical_rebuild") or not uki_result.get("sections_verified"):
+        raise SafetyError("Expected a byte-stable, section-verified UKI")
     archive = regular_file(root_output, "firearc-root.tar")
     data = regular_file(payload_output, payload_result["root_payload"])
     tree = regular_file(payload_output, "root.verity")
@@ -429,20 +443,13 @@ def assemble(root, tools_label, root_label, rootfs_label, label):
     work = private_directory(Path(root) / "build/images") / label
     work.mkdir(mode=0o700)
     staging = work / "esp"
-    for name in ("EFI/BOOT", "EFI/systemd", "loader/entries", "firearc"):
+    for name in ("EFI/BOOT", "EFI/systemd", "EFI/Linux", "loader"):
         (staging / name).mkdir(parents=True, mode=0o700)
     (staging / "loader/loader.conf").write_text(LOADER_CONF)
-    (staging / "loader/entries/firearc-a.conf").write_text(BOOT_ENTRY)
-    (work / "dev.cpio").write_bytes(dev_cpio(authority))
-    with (staging / "firearc/vmlinuz").open("wb") as target:
-        shutil.copyfileobj(kernel.open("rb"), target)
-    with initrd.open("rb") as source_stream, (staging / "firearc/initrd.img").open("wb") as target:
-        shutil.copyfileobj(source_stream, target, 16 * MIB)
-        # The kernel only recognizes a cpio segment at a 4-byte-aligned offset
-        # of the whole concatenated initramfs; zero padding between segments is
-        # skipped by the unpacker.
-        target.write(b"\0" * (-initrd.stat().st_size % 4))
-        target.write((work / "dev.cpio").read_bytes())
+    # The whole boot payload — kernel, command line, verity authority and
+    # development unit — is this one UKI; the ESP carries no separate kernel
+    # or initramfs.
+    shutil.copyfile(uki, staging / ESP_UKI_PATH)
     (work / "gpt.sfdisk").write_text(sfdisk_script())
     workspace = work / "workspace"
     workspace.mkdir(mode=0o700)
@@ -469,7 +476,7 @@ def assemble(root, tools_label, root_label, rootfs_label, label):
             "mkfs.vfat", "--invariant", "-F", "32", "-n", "FIREARC_ESP", "/workspace/esp.img"], timeout=300)
         builder.logged(work, "populate-esp", options + [
             "mcopy", "-i", "/workspace/esp.img", "-s",
-            "/staging/EFI", "/staging/loader", "/staging/firearc", "::"], timeout=300)
+            "/staging/EFI", "/staging/loader", "::"], timeout=300)
         builder.logged(work, "create-disk", options + [
             "truncate", "--size", f"{DISK_MIB}M", "/workspace/device.raw"], timeout=300)
         builder.logged(work, "partition-disk", options + [
@@ -495,11 +502,13 @@ def assemble(root, tools_label, root_label, rootfs_label, label):
                             "type": kind, "uuid": unique} for name, start, size, kind, unique in PARTITIONS],
             "kernel_cmdline": KERNEL_CMDLINE,
             "inputs": {"root_label": root_label, "rootfs_label": rootfs_label,
-                       "root_tar_sha256": sha256(archive), "kernel_sha256": sha256(kernel),
-                       "initrd_sha256": sha256(initrd), "dev_cpio_sha256": sha256(work / "dev.cpio"),
+                       "uki_label": uki_label,
+                       "root_tar_sha256": sha256(archive), "uki_sha256": sha256(uki),
                        "root_payload_sha256": sha256(data), "verity_sha256": sha256(tree),
                        "authority_sha256": sha256(payload_output / "verity-authority.json")},
             "esp": {"loader": "systemd-boot from the root archive", "size_mib": ESP_MIB,
+                    "uki": {"path": ESP_UKI_PATH, "sha256": sha256(uki),
+                            "entry": "systemd-boot type-2 auto-entry (unsigned dev UKI)"},
                     "files": sorted(str(item.relative_to(staging)) for item in staging.rglob("*")
                                     if item.is_file())},
             "scope": "Unsigned development installed-device profile for the QEMU harness; "

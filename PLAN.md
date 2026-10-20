@@ -79,8 +79,8 @@ The enforced chain — reset to read-only root, nothing unsigned executing:
 | vboot protected-RO verification of mutable firmware/payload regions | remaining — investigated and feasible; needs board-layout change + signing keys |
 | FireArc Secure Boot: PK/KEK/db/dbx enrollment, `SecureBoot=1` | remaining — blocked on the key hierarchy |
 | Signed systemd-boot (normal and fallback `BOOTX64.EFI` paths) | remaining |
-| Signed slot-specific UKI with the verity authority embedded | remaining — unsigned UKI construction is unblocked |
-| Initramfs full-root verity preverification | **done** in development form; the authority moves into signed UKI content |
+| Signed slot-specific UKI with the verity authority embedded | **unsigned UKI done** — byte-stable, section-verified, boots the full gate; signing remains |
+| Initramfs full-root verity preverification | **done**; the authority now rides inside the UKI's .initrd section (signed once the UKI is signed) |
 | Read-only dm-verity root (slot A) | **done**; slot B and switching are update-phase work, deferred |
 
 Critical path, in order:
@@ -89,7 +89,8 @@ Critical path, in order:
    source/build trees (Phase 2 items 8–11). This is the single blocker and an
    owner decision.
 2. **Unsigned UKI construction** after frozen root bytes (Phase 3 item 11,
-   Phase 4 items 3–4) — unblocked and next.
+   Phase 4 items 3–4) — **done 2026-10-20**: `just uki` builds the slot-A UKI
+   (byte-identical rebuild, sections verified, type-2 boot gate passed).
 3. **Sign boot manager and UKIs, enroll PK/KEK/db, prove `SecureBoot=1`,
    `SetupMode=0` and unsigned/wrong-key/modified rejection** (Phase 2 items
    12–13; Phase 4 items 5–7 and 13).
@@ -464,7 +465,7 @@ Check only steps supported by project code and recorded validation. A checked do
 8. [ ] Enforce full-root verification: expected hash, salt and geometry must originate inside signed UKI content, not a mutable verity superblock or ESP metadata file. Project-owned dracut gate, strict authority renderer/parser, static audit and synthetic failure tests are implemented (`docs/initramfs.md`). The gate has now also passed a real unsigned QEMU boot with full preverification, read-only mapping and sysroot mount plus a corrupted-root denial (`docs/validation/device-boot.md`); signed authority embedding remains pending.
 9. [x] Generate the final ext4 root offline, with deterministic timestamps, UUID policy, ordering and image size. No machine identity, generated password, host SSH key or runtime entropy file belongs in the generic image. Implemented by `just build-rootfs`; the 4 GiB ext4 payload is byte-reproducible across clean rounds (see `docs/validation/build-system.md`).
 10. [x] Generate a separate SHA-256 verity tree over the documented full protected range. Use a reproducible public salt policy and archive all geometry and digest inputs. Implemented for the frozen 4 GiB payload by `just build-rootfs`; userspace verification/corruption checks passed (see `docs/validation/appliance-root.md`). This does not close authenticated boot or filesystem reproducibility gates.
-11. [ ] Build slot-specific UKI inputs only after the final root bytes are frozen. Never modify root content after computing verity or add files in a post-install writable mount.
+11. [x] Build slot-specific UKI inputs only after the final root bytes are frozen. Never modify root content after computing verity or add files in a post-install writable mount. Implemented by `just uki`: the pinned ukify (tools image, systemd 257.13) combines the root archive's own linuxx64.efi stub and os-release with the frozen kernel, the dracut initramfs and an appended cpio carrying the verity authority and dev unit; the UKI is built twice and must be byte-identical, and every payload section (.osrel/.cmdline/.uname/.linux/.initrd) is verified against its exact input file. The command line embeds `rauc.slot=A`. Unsigned development form: signing and signed-authority embedding are Phase 2/4 work.
 12. [x] Before root mounting, perform full verification, then open the read-only verity mapping. Test both preverification and runtime corruption paths. Full preverification, mapping and read-only mount passed real QEMU boots; a flipped root bit was denied at exactly that offset during preverification, and a third check-boot discipline flips a root byte mid-session after the mapping is up: the dev unit drops caches and re-reads the whole verity device, and dm-verity returns an I/O error at runtime (`FIREARC_RUNTIME_CORRUPT_EIO`) while the uncorrupted control completes a clean full re-read (`docs/validation/device-boot.md`).
 13. [ ] Replace the old poweroff-only rejection path with a bounded authenticated fallback interface, initially in an isolated test profile; no raw-root retry or unrestricted initrd shell.
 14. [ ] Audit generic initramfs errors: absent authority, missing disk, malformed tree, missing tool/module, mount failure and timeout must not open an unauthenticated escape route.
@@ -483,8 +484,8 @@ Check only steps supported by project code and recorded validation. A checked do
 
 1. [ ] Implement deterministic image assembly for the proposed GPT layout. Freeze labels, sizes, partition types, alignment and layout version after capacity checks.
 2. [ ] Provision test root/hash pairs for both slots. Resolve devices through validated same-disk identities and reject ambiguous enumeration.
-3. [ ] Align/qualify systemd-boot, systemd-stub, ukify, measurement tools and target cryptsetup-related systemd versions using pinned builder inputs.
-4. [ ] Build UKIs with ukify and inspect every embedded section. Include signed root authority and `rauc.slot=` for the actual slot.
+3. [x] Align/qualify systemd-boot, systemd-stub, ukify, measurement tools and target cryptsetup-related systemd versions using pinned builder inputs. Aligned from the single pinned snapshot: root archive carries systemd/systemd-boot/stub 257.13-1~deb13u1, tools image carries ukify/systemd-cryptsetup at the same version; ukify construction is byte-stable and section-verified (Phase 3 item 11). Measurement (systemd-measure/PCR) and signing qualification are later items (4 sub-bullet, 5; Phase 5).
+4. [ ] Build UKIs with ukify and inspect every embedded section. Include signed root authority and `rauc.slot=` for the actual slot. Unsigned development form implemented by `just uki`: sections inspected and verified against inputs, `rauc.slot=A` embedded, and the UKI boots the full three-discipline check-boot gate via a systemd-boot type-2 entry (no separate kernel/initramfs on the ESP). Signed root authority and PE signatures remain.
    - Final pipeline, once Phase 5 adds PCR authorization: freeze root -> generate verity -> finalize kernel/initramfs/command-line/public-policy inputs -> calculate/sign the intended PCR states -> embed PCR signatures -> apply the final PE signature. Use ukify's supported measurement rules to avoid circular signing; never alter covered sections afterward. Rebuild all dependent signatures if any input changes.
 5. [ ] Sign the boot manager and both UKIs with approved EFI-image signing credentials; verify signatures before image assembly.
 6. [ ] Put **signed systemd-boot** at both the normal firmware entry and fallback `BOOTX64.EFI` path. Remove the direct-UKI bypass from the normal installed-device profile.
