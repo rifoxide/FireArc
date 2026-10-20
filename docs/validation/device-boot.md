@@ -44,7 +44,10 @@ mount and the self-verified terminal marker, followed by clean poweroff.
 Corruption control: one flipped bit at the root-partition midpoint produced
 `Verification failed at position 2147483648` — exactly the flip offset — no
 mapping, no mount and no terminal marker, followed by failure-path poweroff.
-Both runs exited QEMU through poweroff rather than timeout.
+Both runs exited QEMU through poweroff rather than timeout. The dev unit now
+issues the immediate `poweroff -f` syscall: the previous systemd shutdown job
+once raced `switch_root` into the real root's login prompt (found and fixed
+while qualifying the persistent device profile).
 
 Flash write confinement (same runs): both boots initialized the SMMSTORE
 variable store (33,586 bytes across the first 10 blocks) and left every byte

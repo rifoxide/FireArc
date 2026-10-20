@@ -6,6 +6,7 @@
 | Root, initramfs and integrity payloads | [Root and initramfs](appliance-root.md) |
 | Development device assembly and QEMU boot gate | [Device boot](device-boot.md) |
 | Firmware flash layout and boot write confinement | [Firmware layout](firmware-layout.md) |
+| Persistent installed-device profile with swtpm | [Device profile](device-profile.md) |
 
 The preliminary CycloneDX inventory (`just sbom`) is generated deterministically
 from the locked root closure; its scope limits are stated in the document
@@ -35,6 +36,14 @@ additionally archives the FMAP region inventory with role classification
 flash byte outside SMMSTORE to survive each run unchanged. Firmware security
 review, byte reproducibility and trust qualification remain open gates; see
 [Device boot](device-boot.md).
+
+`just device-provision` / `just device-boot` maintain a persistent
+installed-device profile — OS disk, writable firmware copy and one isolated
+swtpm TPM 2.0 state directory — and cold-start it with fail-closed identity
+continuity: SMMSTORE and TPM state may change only inside guest execution,
+every boot must re-bind the TPM through ACPI/TIS, and provisioning never
+silently resets a device ([device profile](device-profile.md)). It is a
+development harness, not measured boot or provisioning.
 
 Record actual results and limitations against each component's acceptance
 contract. Build IDs identify immutable logs/outputs, not separate implementations

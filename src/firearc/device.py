@@ -63,7 +63,13 @@ StandardError=journal+console
 # The harness marker is written straight to the console device (initrd journald
 # console forwarding nondeterministically drops bursty lines) and is printed
 # only after independently confirming the verified read-only sysroot mount.
-ExecStart=/bin/sh -c 'if grep -Eq " /sysroot ext4 ro(,| )" /proc/mounts; then echo FIREARC_DEV_BOOT_OK > /dev/console; echo FIREARC_DEV_BOOT_OK > /dev/console; else echo FIREARC_DEV_BOOT_MISSING > /dev/console; fi; /usr/bin/systemctl --no-block --force poweroff'
+# The TPM marker reports whether the kernel's built-in tpm_tis driver bound a
+# TPM 2.0 device through ACPI (QEMU's tpm-tis presents the MSFT0101 device; the
+# chip lands at /sys/class/tpm/tpm0 with tpm_version_major=2 and /dev/tpm0);
+# without a TPM attached the profile boot gate expects the explicit miss line. The debug lines are dev-harness
+# diagnostics only. Shutdown uses the immediate poweroff syscall: a systemd
+# shutdown job raced switch_root to the real root in observed runs.
+ExecStart=/bin/sh -c 'echo FIREARC_TPM_DEBUG_CLASS=$(ls /sys/class 2>/dev/null | grep -i tpm); echo FIREARC_TPM_DEBUG_TPM0=$(ls /sys/class/tpm/tpm0 2>&1); echo FIREARC_TPM_DEBUG_VERSION=$(cat /sys/class/tpm/tpm0/tpm_version_major 2>&1); echo FIREARC_TPM_DEBUG_DEV=$(ls /dev/tpm0 /dev/tpmrm0 2>&1); if [ -c /dev/tpm0 ] && [ -d /sys/class/tpm/tpm0 ] && [ "$(cat /sys/class/tpm/tpm0/tpm_version_major 2>/dev/null)" = "2" ]; then echo FIREARC_TPM_TIS_OK > /dev/console; else echo FIREARC_TPM_TIS_MISSING > /dev/console; fi; if grep -Eq " /sysroot ext4 ro(,| )" /proc/mounts; then echo FIREARC_DEV_BOOT_OK > /dev/console; echo FIREARC_DEV_BOOT_OK > /dev/console; else echo FIREARC_DEV_BOOT_MISSING > /dev/console; fi; /usr/bin/poweroff -f || /usr/bin/systemctl --no-block --force poweroff'
 """
 
 LOADER_CONF = "timeout 0\ndefault firearc-a\neditor no\n"
@@ -81,6 +87,11 @@ POSITIVE_MARKERS = ("FIREARC_VERITY_PREVERIFY_OK", "FIREARC_VERITY_MAPPING_READY
 # journald console forwarding can drop the other recorded lines.
 REQUIRED_MARKER = "FIREARC_DEV_BOOT_OK"
 DENIAL_MARKER = re.compile(r"Verification failed at position [0-9]+\.")
+# Console contract for TPM qualification in the persistent device profile:
+# the kernel has CONFIG_TCG_TIS=y/CONFIG_TCG_CRB=y built in, so an attached
+# swtpm tpm-tis device must bind through ACPI without any initrd support.
+TPM_TIS_MARKER = "FIREARC_TPM_TIS_OK"
+TPM_TIS_MISSING_MARKER = "FIREARC_TPM_TIS_MISSING"
 
 
 def cpio_archive(entries):
@@ -134,18 +145,25 @@ def sfdisk_script():
     return "\n".join(lines) + "\n"
 
 
-def qemu_command(firmware, disk, serial, *, kvm):
+def qemu_command(firmware, disk, serial, *, kvm, tpm=None):
     # The payload has no virtio drivers: the development disk is presented
     # over the emulated ICH9 AHCI controller the payload does support.
-    return ["qemu-system-x86_64", "-machine", "q35", "-accel", "kvm" if kvm else "tcg",
-            "-cpu", "max", "-m", "2048", "-nodefaults", "-display", "none", "-no-reboot",
-            "-net", "none", "-serial", f"file:{serial}",
-            # Monolithic firmware: the writable pflash copy carries both code
-            # and the SMMSTORE variable region (no OVMF-style CODE/VARS split).
-            "-drive", f"if=pflash,format=raw,file={firmware}",
-            "-device", "ahci,id=ahci0",
-            "-drive", f"if=none,id=disk0,file={disk},format=raw",
-            "-device", "ide-hd,drive=disk0,bus=ahci0.0"]
+    command = ["qemu-system-x86_64", "-machine", "q35", "-accel", "kvm" if kvm else "tcg",
+               "-cpu", "max", "-m", "2048", "-nodefaults", "-display", "none", "-no-reboot",
+               "-net", "none", "-serial", f"file:{serial}",
+               # Monolithic firmware: the writable pflash copy carries both code
+               # and the SMMSTORE variable region (no OVMF-style CODE/VARS split).
+               "-drive", f"if=pflash,format=raw,file={firmware}",
+               "-device", "ahci,id=ahci0",
+               "-drive", f"if=none,id=disk0,file={disk},format=raw",
+               "-device", "ide-hd,drive=disk0,bus=ahci0.0"]
+    if tpm:
+        # Exactly one emulated TPM per machine, over the ISA TIS interface,
+        # backed by the device profile's isolated swtpm control socket.
+        command += ["-chardev", f"socket,id=chrtpm,path={tpm}",
+                    "-tpmdev", "emulator,id=tpm0,chardev=chrtpm",
+                    "-device", "tpm-tis,tpmdev=tpm0"]
+    return command
 
 
 def boot_verdict(serial_text):
