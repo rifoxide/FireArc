@@ -57,11 +57,16 @@ qualification. The complete secured appliance is not yet implemented.
   restoration happened only by explicit snapshot restore, and a failed
   session adopts its observed identity with an explicit failed record. Two
   real appliance findings recorded honestly: the payload intermittently
-  parks at its interactive boot menu from a pristine variable store
-  (harness sends a bounded, recorded ENTER over QMP), and the ACPI power
-  button is not handled by the minimal root (`device-stop` records it and
-  stops the machine itself). Orphaned QEMU/swtpm now die with the harness
-  (`PR_SET_PDEATHSIG`).
+  parks at its interactive boot menu (mostly from pristine variable stores,
+  once from an initialized one; harness sends a bounded, recorded ENTER over
+  QMP), and the ACPI power button is not handled by the minimal root
+  (`device-stop` records it and stops the machine itself). Orphaned
+  QEMU/swtpm now die with the harness (`PR_SET_PDEATHSIG`).
+- Phase 1 complete: TCG and KVM are distinct qualified profiles
+  (`device-boot --tcg`, per-run `accel` records; ~75 s vs ~23 s per verified
+  cold boot), persistent monolithic flash carries across cold starts and
+  warm-reset loops (PLAN 1.12), and no session ever has a network device
+  (`-net none`, PLAN 1.15).
 - Bounded evidence retention (`just prune`): every successful stage build now
   prunes superseded evidence directories (keeps current + previous per stage),
   never touching device-profile-pinned provenance; the first run freed

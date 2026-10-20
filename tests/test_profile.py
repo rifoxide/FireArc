@@ -262,6 +262,11 @@ class HarnessWiringTests(unittest.TestCase):
                                          qmp_socket=Path("/run/qmp.sock"), rebootable=True)
         self.assertNotIn("-no-reboot", rebootable)
 
+    def test_accelerator_profiles_are_distinct(self):
+        self.assertIn("kvm", device.qemu_command("/f", "/d", "/s", kvm=True))
+        self.assertIn("tcg", device.qemu_command("/f", "/d", "/s", kvm=False))
+        self.assertNotIn("kvm", " ".join(device.qemu_command("/f", "/d", "/s", kvm=False)))
+
     def test_dev_unit_graces_before_poweroff(self):
         self.assertIn(f"sleep {device.GRACE_SECONDS}", device.DEV_UNIT)
         self.assertIn("poweroff -f", device.DEV_UNIT)

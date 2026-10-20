@@ -108,16 +108,16 @@ Eleven recorded operations, audit trail in the profile:
 
 ## Findings recorded during qualification
 
-- **Payload boot-menu stall (intermittent, real defect):** from a pristine
-  variable store the EDK II payload sometimes parks at its interactive menu
-  ("ENTER to boot directly") and never auto-continues — observed twice on
-  fresh profiles (16+ minutes each) while other pristine boots
-  auto-continued (2 stalls / 4 passes observed, plus one earlier one-off).
-  The harness now sends a bounded ENTER keypress over QMP (`input-send-event`;
+- **Payload boot-menu stall (intermittent, real defect):** the EDK II payload
+  sometimes parks at its interactive menu ("ENTER to boot directly") and
+  never auto-continues — observed twice for 16+ minutes from pristine
+  variable stores and once from an initialized store (TCG run 0011), while
+  many other boots auto-continued (3 stalls / 8+ passes observed). The
+  harness sends a bounded ENTER keypress over QMP (`input-send-event`;
   QEMU 11 removed `sendkey`) after 45 s of serial silence, at most 3 times,
-  every keypress recorded in the run evidence (`menu_unstick_keypresses`).
-  The nudge fired for real during qualification (2 keypresses, boot
-  continued). The payload's menu behavior needs review before release.
+  every keypress recorded in run evidence (`menu_unstick_keypresses`); the
+  nudge fired for real during qualification (runs 0007 and 0011). The
+  payload's menu behavior needs review before release.
 - **ACPI power button is not handled** by the development appliance: a QMP
   `system_powerdown` request is ignored for the whole bounded window (no
   logind power-key handling in the minimal root). `device-stop` records this
@@ -146,6 +146,16 @@ Eleven recorded operations, audit trail in the profile:
   `switch_root` and booted into the real root's login prompt. The unit now
   issues the immediate `poweroff -f` syscall (systemctl fallback retained).
 - QEMU provides no persistent CMOS backend; no CMOS state is carried.
+
+### Accelerator profiles
+
+`device-boot --tcg` forces the software-accelerated machine; every run
+records its accelerator. Qualified 2026-10-20 on `dev2`: the TCG profile
+passed the same marker/TPM/write-confinement gate in ~75 s wall time versus
+~23 s for KVM (≈3.2×), with one boot-menu stall observed under TCG from an
+already-initialized store (unstuck by the recorded ENTER nudge). There are no
+firmware TPM measurements to compare between profiles yet — the pinned
+payload has no TPM stack (Phase 5 will revisit).
 
 ## Limits
 

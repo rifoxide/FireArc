@@ -34,6 +34,8 @@ def main():
                                help="Cold-start a persistent device profile with its swtpm")
     boot.add_argument("--name", required=True)
     boot.add_argument("--count", type=int, default=2)
+    boot.add_argument("--tcg", action="store_true",
+                      help="Force the TCG software-accelerated machine (KVM is the default profile)")
     reboot = commands.add_parser("device-reboot",
                                  help="Warm-reset a running profile in one powered session")
     reboot.add_argument("--name", required=True)
@@ -74,7 +76,7 @@ def main():
                 result = profile.provision(ROOT, args.name, replace=args.replace)
         elif args.command == "device-boot":
             with pipeline.project_lock(ROOT):
-                result = profile.boot(ROOT, args.name, count=args.count)
+                result = profile.boot(ROOT, args.name, count=args.count, tcg=args.tcg)
         elif args.command == "device-reboot":
             with pipeline.project_lock(ROOT):
                 result = profile.reboot(ROOT, args.name, resets=args.resets)

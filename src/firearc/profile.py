@@ -391,8 +391,13 @@ def _record_failure(prepared, run_dir, op, error, session, session_ran):
     save_json(prepared["target"] / "profile.json", profile)
 
 
-def boot(root, name, *, count=2):
-    """Cold-start the persistent profile; verify boot, writes and identity."""
+def boot(root, name, *, count=2, tcg=False):
+    """Cold-start the persistent profile; verify boot, writes and identity.
+
+    `tcg=True` forces the TCG software-accelerated machine (initial-correctness
+    profile); KVM is the default distinct profile whenever available. Every
+    run records which accelerator served it.
+    """
     if not 1 <= count <= MAX_BOOT_RUNS:
         raise SafetyError(f"Boot count must be within 1..{MAX_BOOT_RUNS}")
     prepared = _prepare(root, name)
@@ -400,7 +405,8 @@ def boot(root, name, *, count=2):
     layout = prepared["layout"]
     flash, tpm_dir, runs_dir = prepared["flash"], prepared["tpm_dir"], prepared["runs_dir"]
     _assert_session_started_from_expected_state(prepared)
-    kvm = os.access("/dev/kvm", os.R_OK | os.W_OK)
+    kvm = not tcg and os.access("/dev/kvm", os.R_OK | os.W_OK)
+    timeout = VM_TIMEOUT if kvm else 2 * VM_TIMEOUT  # TCG boots are far slower
     first_ever_boot = profile.get("boots", 0) == 0
     records = []
     try:
@@ -418,7 +424,8 @@ def boot(root, name, *, count=2):
                                           "TPM state")
             serial = run_dir / "serial.log"
             machine = Machine(run_dir, prepared["qemu"], prepared["swtpm"], flash,
-                              prepared["disk"], tpm_dir, serial, kvm=kvm)
+                              prepared["disk"], tpm_dir, serial, kvm=kvm,
+                              timeout=timeout)
             session_ran = False
             try:
                 with machine:
@@ -439,6 +446,7 @@ def boot(root, name, *, count=2):
                                   "identical to the erased pristine image")
             record = {
                 "op": "boot", "run": number, "cold_start": True, "kvm": kvm,
+                "accel": "kvm" if kvm else "tcg",
                 "markers": markers, "denial": denial, "tpm_tis_acpi_bound": True,
                 "smmstore_sha256_before": smm_before,
                 "tpm_sha256_before": tpm_before,
