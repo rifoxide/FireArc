@@ -44,6 +44,15 @@ class FakePipeline(pipeline.Pipeline):
             (output / "sbom.json").write_text("{}")
             write_json(work / "result.json", {"passed": True, "artifacts": {"sbom.json": sha256(output / "sbom.json")}})
             return work, {}
+        elif stage == "device":
+            output = work / "output"
+            output.mkdir()
+            (output / "device.raw").write_text("disk fixture")
+            write_json(work / "result.json", {"passed": True, "artifacts": {"device.raw": sha256(output / "device.raw")}})
+            return work, {}
+        elif stage == "check-boot":
+            write_json(work / "result.json", {"passed": True})
+            return work, {}
         else:
             output = work / "output"
             output.mkdir()
@@ -78,6 +87,18 @@ class PipelineTests(unittest.TestCase):
             self.assertIn("rootfs-", record["id"])
             second = FakePipeline(root)
             self.assertEqual(second.ensure("rootfs"), record)
+            self.assertEqual(second.calls, [])
+
+    def test_boot_check_resolves_the_full_device_chain_without_labels(self):
+        with temporary() as root:
+            self.workspace(root)
+            first = FakePipeline(root, online=True)
+            record = first.ensure("check-boot")
+            self.assertEqual(first.calls, ["metadata", "packages-tools", "tools", "packages-root",
+                                            "root", "rootfs", "device", "check-boot"])
+            self.assertIn("check-boot-", record["id"])
+            second = FakePipeline(root)
+            self.assertEqual(second.ensure("check-boot"), record)
             self.assertEqual(second.calls, [])
 
     def test_code_changes_invalidate_builds_but_not_authenticated_downloads(self):

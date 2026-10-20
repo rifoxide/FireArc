@@ -30,7 +30,22 @@ def doctor(root):
         tools[name] = item
     qemu_ready = (platform.system() == "Linux" and platform.machine() == "x86_64"
                 and all(tools[name].get("pin_matches") for name in ("qemu-system-x86_64", "qemu-img")))
-    return {"qemu_tools_ready": qemu_ready, "tools": tools, "python": platform.python_version(),
+    ovmf = {}
+    for role, item in load_lock(root, "host-tools").get("ovmf", {}).items():
+        entry = {"path": item["path"]}
+        try:
+            path = Path(item["path"])
+            entry["available"] = path.is_file()
+            if entry["available"]:
+                entry["sha256"] = sha256(path)
+                entry["pin_matches"] = entry["sha256"] == item["sha256"]
+        except OSError as error:
+            entry["available"] = False
+            entry["error"] = str(error)
+        ovmf[role] = entry
+    ovmf_ready = bool(ovmf) and all(item.get("pin_matches") for item in ovmf.values())
+    return {"qemu_tools_ready": qemu_ready, "ovmf_ready": ovmf_ready, "ovmf": ovmf,
+            "tools": tools, "python": platform.python_version(),
             "host": platform.platform(), "disk_free_bytes": shutil.disk_usage(root).free,
             "kvm_accessible": os.access("/dev/kvm", os.R_OK | os.W_OK),
             "scope": "Read-only availability/compatibility report; no packages installed, no release/build qualification"}

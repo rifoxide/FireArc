@@ -7,7 +7,10 @@ export LC_ALL=C
 # Failure exits the required oneshot unit; no recovery shell or raw-root retry.
 fa_load_authority /etc/firearc/verity.authority
 fa_check_cmdline /proc/cmdline
-udevadm settle --timeout=15
+# The loader-identity evidence requires efivarfs; mount it if this initrd's
+# systemd has not. A failed mount still fails the gate through the ESP check.
+mount -t efivarfs efivarfs /sys/firmware/efi/efivars 2>/dev/null || :
+fa_wait_devices
 fa_select_devices
 fa_check_boot_esp
 fa_verify_and_open

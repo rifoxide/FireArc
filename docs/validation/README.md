@@ -4,6 +4,7 @@
 | --- | --- |
 | Public dependency acquisition and clean builds | [Build system](build-system.md) |
 | Root, initramfs and integrity payloads | [Root and initramfs](appliance-root.md) |
+| Development device assembly and QEMU boot gate | [Device boot](device-boot.md) |
 
 The preliminary CycloneDX inventory (`just sbom`) is generated deterministically
 from the locked root closure; its scope limits are stated in the document

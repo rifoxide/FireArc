@@ -39,6 +39,14 @@ sbom *options:
 firmware-sources *options:
     python3 -B scripts/firearc.py firmware-sources "$@"
 
+# Assemble the unsigned development installed-device disk (ESP + slot A).
+device *options:
+    python3 -B scripts/firearc.py device "$@"
+
+# Boot the development disk in QEMU Q35 and assert the integrity gate outcome.
+check-boot *options:
+    python3 -B scripts/firearc.py check-boot "$@"
+
 build *options:
     python3 -B scripts/firearc.py build "$@"
 

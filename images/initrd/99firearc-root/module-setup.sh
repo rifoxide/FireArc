@@ -7,7 +7,7 @@ installkernel() {
 }
 
 install() {
-    inst_multiple veritysetup blkid lsblk blockdev stat grep od tr sed cat udevadm
+    inst_multiple veritysetup blkid lsblk blockdev stat grep od tr sed cat udevadm sleep
     inst_simple "$moddir/authority.sh" /usr/lib/firearc/authority.sh
     inst_script "$moddir/firearc-verify-root" /usr/lib/firearc/verify-root
     chmod 0755 "$initdir/usr/lib/firearc/verify-root"

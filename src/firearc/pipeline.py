@@ -13,7 +13,7 @@ import sys
 import tarfile
 import uuid
 
-from . import builder, firmware, initrd, rootfs, sbom
+from . import builder, device, firmware, initrd, rootfs, sbom
 from .inputs import validate_locks
 from .integrity import SafetyError, private_directory, read_json, regular_file, sha256, verify_file, write_json
 
@@ -23,6 +23,7 @@ DEPENDENCIES = {
     "rootfs": ("tools", "root"), "check-initrd": ("tools", "root"),
     "check-rootfs": ("tools", "rootfs"), "sbom": ("packages-root",),
     "firmware-sources": (),
+    "device": ("tools", "root", "rootfs"), "check-boot": ("tools", "device"),
 }
 
 
@@ -121,9 +122,17 @@ class Pipeline:
         fingerprint = hashlib.sha256(json.dumps([source, {name: value["receipt_sha256"] for name, value in dependencies.items()}, sys.version], sort_keys=True).encode()).hexdigest()
         previous = self.state["stages"].get(stage)
         if previous and previous["fingerprint"] == fingerprint and not (self.force_checks and stage.startswith("check-")):
-            self.verify_record(previous)
-            self.memo[stage] = previous
-            return previous
+            try:
+                self.verify_record(previous)
+            except FileNotFoundError:
+                # A matching fingerprint whose evidence directories are gone
+                # (for example after external build-directory cleanup) is
+                # stale, not tampered: rebuild it from the current inputs.
+                # Verification failures still fail closed.
+                print(f"Stale cached {stage}; rebuilding…", file=sys.stderr, flush=True)
+            else:
+                self.memo[stage] = previous
+                return previous
         if stage.startswith("packages-") or stage == "metadata":
             if not self.online:
                 raise SafetyError("Missing/stale dependencies; run just bootstrap (explicit network acquisition)")
@@ -163,6 +172,12 @@ class Pipeline:
         if stage == "firmware-sources":
             firmware.fetch(root, build_id, allow_network=self.online)
             return self.build / "firmware" / build_id, {}
+        if stage == "device":
+            device.assemble(root, deps["tools"]["id"], deps["root"]["id"], deps["rootfs"]["id"], build_id)
+            return self.build / "images" / build_id, {}
+        if stage == "check-boot":
+            device.check_boot(root, deps["tools"]["id"], deps["device"]["id"], build_id)
+            return self.build / "images" / build_id, {}
         if stage == "metadata":
             target = builder.metadata_path(root)
             if target.exists():
@@ -247,6 +262,8 @@ def run(root, command, *, online=False):
         elif command == "build-root": pipeline.ensure("root")
         elif command == "sbom": pipeline.ensure("sbom")
         elif command == "firmware-sources": pipeline.ensure("firmware-sources")
+        elif command == "device": pipeline.ensure("device")
+        elif command == "check-boot": pipeline.ensure("check-boot")
         elif command == "check-initrd": pipeline.ensure("check-initrd")
         elif command == "check-rootfs": pipeline.ensure("check-rootfs")
         else:

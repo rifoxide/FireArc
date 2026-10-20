@@ -24,4 +24,10 @@ def validate_locks(root):
     for tool in load_lock(root, "host-tools")["tools"].values():
         if not SHA256.fullmatch(tool["sha256"]):
             raise SafetyError("Invalid host compatibility pin")
+    ovmf = load_lock(root, "host-tools").get("ovmf", {})
+    if set(ovmf) != {"code", "vars"}:
+        raise SafetyError("Expected exactly the OVMF code/vars compatibility pins")
+    for role, item in ovmf.items():
+        if not item.get("path", "").startswith("/usr/share/OVMF/") or not SHA256.fullmatch(item.get("sha256", "")):
+            raise SafetyError(f"Invalid OVMF {role} compatibility pin")
     return spec

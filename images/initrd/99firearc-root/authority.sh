@@ -81,6 +81,26 @@ fa_parent_disk() {
     printf '%s\n' "$parent"
 }
 
+fa_wait_devices() {
+    # Boot media may enumerate after initrd start; probe the required labels
+    # for a bounded period instead of trusting a single settle window.
+    local uptime now deadline
+    read -r uptime _ < /proc/uptime || return 1
+    deadline=$(( ${uptime%%.*} + 30 ))
+    while :; do
+        udevadm settle --timeout=5 || return 1
+        if fa_unique_label "FIREARC_ROOT_$FA_SLOT" >/dev/null 2>&1 \
+            && fa_unique_label "FIREARC_HASH_$FA_SLOT" >/dev/null 2>&1 \
+            && fa_unique_label FIREARC_ESP >/dev/null 2>&1; then
+            return 0
+        fi
+        read -r uptime _ < /proc/uptime || return 1
+        now=${uptime%%.*}
+        [ "$now" -lt "$deadline" ] || return 1
+        sleep 0.2 || sleep 1
+    done
+}
+
 fa_select_devices() {
     local root_parent hash_parent esp_parent
     case "$FA_SLOT" in A|B) ;; *) return 1 ;; esac
@@ -97,17 +117,20 @@ fa_select_devices() {
 }
 
 fa_check_boot_esp() {
-    local uuid actual expected
+    local uuid actual lower upper
     uuid=$(blkid -p -s PART_ENTRY_UUID -o value "$FA_ESP_DEVICE") || return 1
     [ "${#uuid}" -eq 36 ] || return 1
     case "$uuid" in ????????-????-????-????-????????????) ;; *) return 1 ;; esac
     case "$uuid" in *[!0-9a-f-]*) return 1 ;; esac
     # Compare the boot loader's UTF-16LE UUID, including terminator, without
-    # evaluating/decoding variable contents into shell syntax.
+    # evaluating/decoding variable contents into shell syntax. GUID formatters
+    # render hex in one whole-string case; accept exactly those two byte
+    # patterns rather than decoding or wildcarding the variable bytes.
     actual=$(od -An -v -tx1 -j4 /sys/firmware/efi/efivars/LoaderDevicePartUUID-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f | tr -d ' \n') || return 1
-    expected=$(printf '%s' "$uuid" | od -An -v -tx1 | tr -d ' \n' | sed 's/../&00/g')0000
-    [ "${#actual}" -eq 148 ] && [ "${#expected}" -eq 148 ] || return 1
-    [ "$actual" = "$expected" ]
+    lower=$(printf '%s' "$uuid" | od -An -v -tx1 | tr -d ' \n' | sed 's/../&00/g')0000
+    upper=$(printf '%s' "$uuid" | tr 'a-f' 'A-F' | od -An -v -tx1 | tr -d ' \n' | sed 's/../&00/g')0000
+    [ "${#actual}" -eq 148 ] && [ "${#lower}" -eq 148 ] && [ "${#upper}" -eq 148 ] || return 1
+    [ "$actual" = "$lower" ] || [ "$actual" = "$upper" ]
 }
 
 fa_mapping_absent() { [ ! -e /dev/mapper/firearc-root ] && [ ! -L /dev/mapper/firearc-root ]; }
@@ -121,8 +144,10 @@ fa_verify_and_open() {
         --no-superblock --format=1 --hash=sha256 --data-blocks=1048576 \
         --data-block-size=4096 --hash-block-size=4096 --hash-offset=0 --salt="$FA_SALT" || return 1
     echo FIREARC_VERITY_PREVERIFY_OK
+    # dm-verity mappings are read-only by construction; the post-open blockdev
+    # checks below enforce that property instead of trusting a setup flag.
     veritysetup open "$FA_ROOT_DEVICE" firearc-root "$FA_HASH_DEVICE" "$FA_ROOT_HASH" \
-        --readonly --no-superblock --format=1 --hash=sha256 --data-blocks=1048576 \
+        --no-superblock --format=1 --hash=sha256 --data-blocks=1048576 \
         --data-block-size=4096 --hash-block-size=4096 --hash-offset=0 --salt="$FA_SALT" || return 1
     if [ "$(blockdev --getro /dev/mapper/firearc-root)" != 1 ] || [ "$(blockdev --getsize64 /dev/mapper/firearc-root)" != 4294967296 ]; then
         veritysetup close firearc-root || :

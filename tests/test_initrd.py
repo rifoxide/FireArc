@@ -49,6 +49,7 @@ elif tool=='veritysetup':
 elif tool=='od':
     if '-j4' in args:
         value='11111111-2222-3333-4444-555555555555' if mode!='wrong-esp' else 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+        if mode=='loader-uppercase': value=value.upper()
         print((value+chr(0)).encode('utf-16le').hex())
     else: os.execv('/usr/bin/od',['od',*args])
 '''
@@ -91,7 +92,9 @@ class InitrdTests(unittest.TestCase):
                     if row[0] == "veritysetup":
                         self.assertIn("--no-superblock", row)
                         self.assertIn("--data-blocks=1048576", row)
-                        if row[1] == "open": self.assertIn("--readonly", row)
+                        # veritysetup open has no --readonly option; read-only
+                        # mapping behavior is asserted after the open instead.
+                        if row[1] == "open": self.assertNotIn("--readonly", row)
 
     def test_malformed_authority_is_denied_before_any_device_access(self):
         good = self.authority()
@@ -111,6 +114,14 @@ class InitrdTests(unittest.TestCase):
                 result, calls = self.run_library(root, self.authority(), mode)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertFalse(any(row[0] == "veritysetup" for row in calls))
+
+    def test_loader_supplied_uppercase_guid_is_normalized_not_matched_raw(self):
+        # Boot loaders emit LoaderDevicePartUUID with uppercase hex; the exact
+        # byte comparison must accept either whole-string GUID casing.
+        with temporary() as root:
+            result, calls = self.run_library(root, self.authority(), "loader-uppercase")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual([row[1] for row in calls if row[0] == "veritysetup"], ["verify", "open"])
 
     def test_failed_preverification_never_opens_mapping(self):
         with temporary() as root:
