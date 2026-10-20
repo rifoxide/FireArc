@@ -22,7 +22,10 @@ qualification. The complete secured appliance is not yet implemented.
   with a deterministic serial number derived from the closure fingerprint.
 - Exact-commit acquisition of the pinned upstream firmware repositories
   (`just firmware-sources --online`), with per-source tree records and offline
-  re-verification. No submodules are fetched and nothing is built or trusted yet.
+  re-verification. The seven pinned submodules are materialized inside the
+  coreboot/EDK II checkouts under a gitlink census enforced against each parent
+  tree, declining every unlisted upstream submodule. Nothing is built or
+  trusted yet.
 - Development installed-device profile (`just device`): a GPT disk with ESP,
   slot-A root and hash partitions assembled offline from the frozen payloads,
   with systemd-boot taken from the same root archive.

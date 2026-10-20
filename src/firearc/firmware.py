@@ -1,16 +1,20 @@
 """Acquisition of pinned upstream firmware source repositories.
 
-Exact-commit checkout only, with recorded tree inventories. No submodules are
-fetched yet and nothing is built: firmware compilation, patch review and trust
-qualification are separate, later steps. Host Git is a trusted tool here.
+Exact-commit checkout only, with recorded tree inventories. Submodule
+repositories named by the lock are materialized inside their parent
+checkouts; the lock's gitlink census must match each pinned parent tree
+exactly, so any other upstream submodule is explicitly declined rather than
+silently fetched. Nothing is built: firmware compilation, patch review and
+trust qualification are separate, later steps. Host Git is a trusted tool
+here.
 """
 
-import json
+import os
 from pathlib import Path
 import re
 import subprocess
 
-from .inputs import load_lock
+from .inputs import load_lock, validate_firmware_sources
 from .integrity import SafetyError, identifier, private_directory, read_json, regular_file, sha256, write_json
 
 
@@ -35,14 +39,67 @@ def inventory(repository):
         repository.parent, "record", "-C", str(repository), "status", "--porcelain").strip())}
 
 
+def gitlinks(work, repository):
+    """Map every gitlink path recorded in HEAD to its pinned commit."""
+    listing = git(work, "gitlinks", "-C", str(repository), "ls-tree", "-r", "-z", "HEAD")
+    entries = {}
+    for record in listing.split("\0"):
+        if not record:
+            continue
+        meta, path = record.split("\t", 1)
+        mode, kind, commit = meta.split(" ")
+        if mode == "160000":
+            if kind != "commit" or not re.fullmatch(r"[0-9a-f]{40}", commit) or not path:
+                raise SafetyError("Unexpected Git gitlink identity")
+            entries[path] = commit
+    return entries
+
+
+def embedded_repositories(repository):
+    """Relative paths below a parent checkout that hold their own .git."""
+    found = set()
+    for current, directories, _files in os.walk(repository):
+        current = Path(current)
+        keep = []
+        for entry in sorted(directories):
+            if entry == ".git":
+                continue
+            keep.append(entry)
+            if (current / entry / ".git").exists():
+                found.add((current / entry).relative_to(repository).as_posix())
+        directories[:] = keep
+    return found
+
+
+def checkout_paths(source):
+    """Every checkout location (relative to sources/) for one pinned source."""
+    places = [Path("sources") / source["name"]]
+    return [Path("sources") / destination["repository"] / destination["path"]
+            for destination in source.get("destinations", [])] or places
+
+
+def acquire(work, relative, source, sequence):
+    """Clone one pinned source at one location and verify its checkout."""
+    repository = work / relative
+    repository.parent.mkdir(parents=True, exist_ok=True)
+    if repository.exists() and (not repository.is_dir() or any(repository.iterdir())):
+        raise SafetyError("Firmware source already acquired for this attempt")
+    label = f"{source['name']}-{sequence}"
+    git(work, f"clone-{label}", "clone", "--quiet", "--no-checkout",
+        source["repository"], str(repository), timeout=1800)
+    git(work, f"checkout-{label}", "-C", str(repository), "checkout", "--quiet", "--detach",
+        source["commit"])
+    record = inventory(repository)
+    if record["commit"] != source["commit"] or record["dirty"]:
+        raise SafetyError(f"Acquired firmware source does not match its pin: {source['name']}")
+    return record
+
+
 def fetch(root, label, *, allow_network=False):
-    """Clone each pinned repository and verify its exact commit."""
+    """Clone each pinned repository, verify commits and materialize listed submodules."""
     identifier(label)
-    sources = load_lock(root, "firmware-sources")["sources"]
-    for source in sources:
-        name = re.fullmatch(r"[a-z0-9][a-z0-9-]*", source["name"])
-        if not name or (source.get("edk2_path") and not source["edk2_path"].startswith(("Mde", "Crypto", "Security"))):
-            raise SafetyError("Unexpected firmware source pin")
+    lock = load_lock(root, "firmware-sources")
+    validate_firmware_sources(lock)
     if not allow_network:
         raise SafetyError("Firmware sources absent; pass --allow-network for explicit acquisition")
     private_directory(Path(root) / "build", create=True)
@@ -51,27 +108,48 @@ def fetch(root, label, *, allow_network=False):
     records = {}
     output = work / "output"
     output.mkdir(mode=0o700)
-    for source in sources:
+    parents = [source for source in lock["sources"] if not source.get("destinations")]
+    submodules = [source for source in lock["sources"] if source.get("destinations")]
+    census = {}
+    for source in parents:
         repository = work / "sources" / source["name"]
-        repository.parent.mkdir(parents=True, exist_ok=True)
-        if repository.exists():
-            raise SafetyError("Firmware source already acquired for this attempt")
-        git(work, f"clone-{source['name']}", "clone", "--quiet", "--no-checkout",
-            source["repository"], str(repository), timeout=1800)
-        git(work, f"checkout-{source['name']}", "-C", str(repository), "checkout", "--quiet", "--detach",
-            source["commit"])
-        record = inventory(repository)
-        if record["commit"] != source["commit"] or record["dirty"]:
-            raise SafetyError(f"Acquired firmware source does not match its pin: {source['name']}")
+        records[source["name"]] = acquire(work, Path("sources") / source["name"], source, 0)
+        census[source["name"]] = gitlinks(work, repository)
+        if census[source["name"]] != lock["gitlink_census"][source["name"]]:
+            raise SafetyError(f"Pinned tree gitlinks differ from the locked census: {source['name']}")
+    materialized = []
+    for source in submodules:
+        record = None
+        for sequence, destination in enumerate(source["destinations"], 1):
+            if census[destination["repository"]][destination["path"]] != source["commit"]:
+                raise SafetyError(f"Locked submodule pin disagrees with the parent gitlink: {source['name']}")
+            relative = Path("sources") / destination["repository"] / destination["path"]
+            current = acquire(work, relative, source, sequence)
+            if record is None:
+                record = current
+            elif current != record:
+                raise SafetyError(f"Submodule checkouts disagree for one pin: {source['name']}")
+            materialized.append(f"{destination['repository']}:{destination['path']}")
         records[source["name"]] = record
-    write_json(output / "sources.json", {"schema": 1, "sources": records,
-                                         "submodules_fetched": False,
-                                         "scope": "Pinned upstream checkouts only; not reviewed, built or trusted"})
+    for source in parents:
+        repository = work / "sources" / source["name"]
+        if git(work, "parent-status", "-C", str(repository), "status", "--porcelain").strip():
+            raise SafetyError(f"Materialized submodules diverge from the parent gitlinks: {source['name']}")
+        expected = {destination["path"] for other in submodules
+                    for destination in other["destinations"] if destination["repository"] == source["name"]}
+        if embedded_repositories(repository) != expected:
+            raise SafetyError(f"Unexpected materialized submodule below {source['name']}")
+    materialized.sort()
+    write_json(output / "sources.json", {"schema": 2, "sources": records, "gitlink_census": census,
+                                         "materialized": materialized, "submodules_fetched": True,
+                                         "scope": "Pinned upstream checkouts with listed submodules materialized; "
+                                                  "not reviewed, built or trusted"})
     write_json(work / "result.json", {"passed": True, "artifacts": {"sources.json": sha256(output / "sources.json")},
-                                      "sources": len(records),
-                                      "scope": "Exact-commit acquisition; no build or security qualification"})
-    return {"passed": True, "evidence": str(work), "sources": len(records),
-            "scope": "Pinned firmware sources acquired; nothing built or trusted"}
+                                      "sources": len(records), "submodules": len(materialized),
+                                      "scope": "Exact-commit acquisition incl. pinned submodule closure; "
+                                               "no build or security qualification"})
+    return {"passed": True, "evidence": str(work), "sources": len(records), "submodules": len(materialized),
+            "scope": "Pinned firmware sources acquired with submodule closure; nothing built or trusted"}
 
 
 def verify(root, label):
@@ -79,13 +157,33 @@ def verify(root, label):
     identifier(label)
     work = private_directory(Path(root) / "build/firmware")
     records = read_json(regular_file(work / label, "output/sources.json"))
-    if records.get("submodules_fetched"):
-        raise SafetyError("Unexpected submodule state for a sources-only acquisition")
-    for source in load_lock(root, "firmware-sources")["sources"]:
+    lock = load_lock(root, "firmware-sources")
+    validate_firmware_sources(lock)
+    if records.get("schema") != 2 or not records.get("submodules_fetched"):
+        raise SafetyError("Acquisition predates submodule closure; re-acquire with just firmware-sources --online")
+    census = {}
+    for source in lock["sources"]:
         record = records["sources"].get(source["name"])
         if not record or record["commit"] != source["commit"]:
             raise SafetyError(f"Acquired firmware source drift: {source['name']}")
-        current = inventory(work / label / "sources" / source["name"])
-        if current != record:
-            raise SafetyError(f"Acquired firmware tree changed after acquisition: {source['name']}")
+        for relative in checkout_paths(source):
+            repository = work / label / relative
+            if not repository.is_dir():
+                raise SafetyError(f"Acquired firmware checkout missing: {source['name']} at {relative}")
+            if inventory(repository) != record:
+                raise SafetyError(f"Acquired firmware tree changed after acquisition: {source['name']}")
+        if not source.get("destinations"):
+            repository = work / label / "sources" / source["name"]
+            census[source["name"]] = gitlinks(work, repository)
+            if census[source["name"]] != lock["gitlink_census"][source["name"]]:
+                raise SafetyError(f"Acquired tree gitlinks differ from the locked census: {source['name']}")
+            if git(work, "parent-status", "-C", str(repository), "status", "--porcelain").strip():
+                raise SafetyError(f"Materialized submodules diverge from the parent gitlinks: {source['name']}")
+    if census != records.get("gitlink_census"):
+        raise SafetyError("Recorded gitlink census no longer matches the acquired trees")
+    for source in [source for source in lock["sources"] if not source.get("destinations")]:
+        expected = {destination["path"] for other in lock["sources"]
+                    for destination in other.get("destinations", []) if destination["repository"] == source["name"]}
+        if embedded_repositories(work / label / "sources" / source["name"]) != expected:
+            raise SafetyError(f"Unexpected materialized submodule below {source['name']}")
     return records

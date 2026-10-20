@@ -130,8 +130,12 @@ Build IDs are automatic internal identifiers, not user-selected command argument
 ### 3.1 Pinned firmware sources
 
 The following upstream commits and SDK image are recorded in
-`locks/firmware-sources.json`. Firmware acquisition/build integration and security
-qualification remain separate tasks; a version pin is not a successful build.
+`locks/firmware-sources.json`. The seven submodule repositories are bound to
+the gitlink paths their pinned parent trees record, and the lock carries a
+full gitlink census per parent so acquisition materializes only listed
+submodules and fails on any census mismatch. Firmware acquisition/build
+integration and security qualification remain separate tasks; a version pin
+is not a successful build.
 
 | Component | Repository | Commit |
 | --- | --- | --- |
