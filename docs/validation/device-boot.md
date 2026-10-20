@@ -82,8 +82,10 @@ Because initrd journald console forwarding nondeterministically drops status
 lines, only the self-verified terminal marker is authoritative for the
 positive verdict; other gate markers are recorded as supporting evidence.
 
-Two independent full builds from the same pinned inputs on this host
-(fresh source acquisition, separate build trees) produced **byte-identical**
+Three independent full builds from the same pinned inputs on this host
+(fresh source acquisition, separate build trees — the third with the full
+expanded-input evidence capture: expanded Kconfig, payload DSC/FDF, explicit
+patch record, per-step build-command digests) produced **byte-identical**
 8 MiB ROMs (`e2e1cc045baa84a4afb37a62d3468617770e71add0c7941b13634489c3da1176`):
 coreboot derives `SOURCE_DATE_EPOCH` from the pinned commit date and the
 container environment is pinned, so the compile is deterministic here. This

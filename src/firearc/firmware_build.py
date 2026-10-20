@@ -77,6 +77,17 @@ def check_configuration(text, edk2_pin):
         raise SafetyError("Build configuration enables the declined dasharo-blobs bootsplash")
 
 
+def payload_description_files(workspace):
+    """The payload DSC the build consumed and the FDF its FLASH_DEFINITION names."""
+    dsc = regular_file(workspace, "DasharoPayloadPkg/DasharoPayloadPkg.dsc")
+    match = re.search(r"^\s*FLASH_DEFINITION\s*=\s*(\S+)", dsc.read_text(errors="replace"),
+                      re.MULTILINE)
+    if not match:
+        raise SafetyError("Payload DSC declares no FLASH_DEFINITION")
+    fdf = regular_file(workspace, match.group(1))
+    return dsc, fdf
+
+
 def build(root, sources_label, label, *, allow_network=False):
     """Compile the pinned sources into coreboot.rom with recorded provenance."""
     identifier(label)
@@ -122,12 +133,41 @@ def build(root, sources_label, label, *, allow_network=False):
     if "payload" not in (work / "cbfstool-print.stdout").read_text().lower():
         raise SafetyError("Built firmware CBFS inventory does not list a payload")
     shutil.copyfile(rom, output / "coreboot.rom")
+    # Expanded build inputs for the evidence record: the full Kconfig the
+    # build actually compiled (olddefconfig expands the reviewed fragment),
+    # the payload description files it consumed, and digests of every build
+    # command with its exit status. No patches are applied — pinned upstream
+    # sources plus the reviewed config fragment are the only project inputs.
+    expanded = work / "expanded.config"
+    shutil.copyfile(tree / ".config", expanded)
+    dsc, fdf = payload_description_files(workspace)
+    payload_dir = work / "payload-description"
+    payload_dir.mkdir(mode=0o700)
+    shutil.copyfile(dsc, payload_dir / dsc.name)
+    shutil.copyfile(fdf, payload_dir / fdf.name)
+    commands = {}
+    for step_file in sorted(work.glob("*.command.json")):
+        step = step_file.name[:-len(".command.json")]
+        commands[step] = {"command_sha256": sha256(step_file),
+                          "exit_sha256": sha256(step_file.with_name(step + ".exit.json"))}
     manifest = {"schema": 1,
                 "sources": {name: {"commit": record["commit"], "tree": record["tree"]}
                             for name, record in records["sources"].items()},
                 "materialized": records["materialized"],
                 "sdk_image": lock["sdk_image"],
                 "configuration": {"path": CONFIG_PATH, "sha256": sha256(configuration)},
+                "expanded_configuration": {"bytes": expanded.stat().st_size,
+                                           "sha256": sha256(expanded)},
+                "payload_description": {
+                    "dsc": {"path": dsc.relative_to(workspace).as_posix(),
+                            "sha256": sha256(dsc)},
+                    "fdf": {"path": fdf.relative_to(workspace).as_posix(),
+                            "sha256": sha256(fdf)},
+                },
+                "patches": {"applied": [],
+                            "note": "Pinned upstream sources; the reviewed config "
+                                    "fragment is the only project input"},
+                "build_commands": commands,
                 "board": "emulation/qemu-q35",
                 "coreboot.rom": {"sha256": sha256(output / "coreboot.rom"), "bytes": rom.stat().st_size},
                 "toolchain_evidence": {"cbfstool_print": sha256(work / "cbfstool-print.stdout"),

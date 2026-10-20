@@ -9,6 +9,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from firearc import firmware_build
 from firearc.inputs import load_lock
 from firearc.integrity import SafetyError
+from support import temporary
 
 CONFIGURATION = (ROOT / firmware_build.CONFIG_PATH).read_text()
 EDK2_PIN = {source["name"]: source["commit"]
@@ -43,6 +44,24 @@ class FirmwareBuildTests(unittest.TestCase):
         self.assertEqual(firmware_build.EXPECTED_ROM_SIZE, 0x800000)
         self.assertEqual(firmware_build.PAYLOAD_WORKSPACE.as_posix(),
                          "payloads/external/edk2/workspace/Dasharo")
+
+    def test_payload_description_files_follow_the_flash_definition(self):
+        with temporary() as workspace:
+            package = workspace / "DasharoPayloadPkg"
+            package.mkdir(parents=True, mode=0o700)
+            (package / "DasharoPayloadPkg.dsc").write_text(
+                "[Defines]\n  FLASH_DEFINITION                    = DasharoPayloadPkg/DasharoPayloadPkg.fdf\n")
+            (package / "DasharoPayloadPkg.fdf").write_bytes(b"fdf")
+            dsc, fdf = firmware_build.payload_description_files(workspace)
+            self.assertEqual(dsc.name, "DasharoPayloadPkg.dsc")
+            self.assertEqual(fdf.read_bytes(), b"fdf")
+            (package / "DasharoPayloadPkg.fdf").unlink()
+            # A missing FDF (or a DSC without FLASH_DEFINITION) fails closed.
+            with self.assertRaises((SafetyError, FileNotFoundError)):
+                firmware_build.payload_description_files(workspace)
+            (package / "DasharoPayloadPkg.dsc").write_text("[Defines]\n")
+            with self.assertRaises(SafetyError):
+                firmware_build.payload_description_files(workspace)
 
 
 if __name__ == "__main__":

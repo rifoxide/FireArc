@@ -77,6 +77,15 @@ qualification. The complete secured appliance is not yet implemented.
   minimal dracut initramfs (the read uses coreutils cat), and the unit's old
   guest-side poweroff was dead code anyway (switch_root stops the unit
   before it runs).
+- Firmware evidence capture completed and a third byte-identical build
+  (PLAN Phase 2 items 2 and 7): the firmware-build stage now archives the
+  expanded Kconfig, the payload DSC/FDF (resolved from the DSC's
+  FLASH_DEFINITION), an explicit empty patch record, and per-step
+  build-command digests; the rebuilt ROM reproduced `e2e1cc04…` byte-for-byte
+  and passed the full three-discipline check-boot gate again. ADR 0005
+  records that the initial firmware verifier in QEMU is host-anchored only —
+  no verified-boot claims until a protected-RO layout, signing keys and
+  their own qualification exist.
 - Bounded evidence retention (`just prune`): every successful stage build now
   prunes superseded evidence directories (keeps current + previous per stage),
   never touching device-profile-pinned provenance; the first run freed
