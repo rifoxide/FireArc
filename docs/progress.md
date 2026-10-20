@@ -138,9 +138,26 @@ qualification. The complete secured appliance is not yet implemented.
   Boot still unenforced — signatures are carried, not yet required).
   `just build` publishes `uki-a-signed.efi`; regenerating keys restages
   signatures automatically (custody manifest is a stage input).
-  Next: enroll PK/KEK/db into the device variable store (3c) and prove
-  `SecureBoot=1`/`SetupMode=0` with unsigned- and wrong-key-rejection
-  tests (3d, G2 core).
+- **Variable-store enrollment implemented** (chain step 3c; PLAN Phase 2
+  item 12 annotated; ADR 0007, `just enroll`): the dev PK/KEK/db plus
+  `SecureBoot=1`/`SetupMode=0` are constructed offline into the erased
+  SMMSTORE region of the firmware-build ROM, producing the `enrolled.rom`
+  artifact. Every structure matches the pinned EDK II sources exactly
+  (28-byte authenticated store header, 60-byte packed auth entries,
+  4-byte entry alignment, the payload's 64 KiB `PcdVariableStoreSize`
+  convention), and the parser was validated against ground truth — real
+  payload-initialized stores from boot evidence. Two decisive findings
+  from that evidence: the payload auto-enrolls its own default
+  PK/KEK/db/dbx on pristine-start boots (replaced wholesale by our
+  constructed store), and it never creates the `SecureBoot` variable —
+  which the pinned `DxeImageVerificationLib` requires before verifying
+  anything, explaining why our differently-signed artifacts kept booting.
+  The stage fails closed (erased-region check, byte-deterministic double
+  build, re-parse round trip, confinement to SMMSTORE) and restages when
+  the generated hierarchy payloads change.
+  Next: prove enforcement on the enrolled image (3d) — `SecureBoot=1`/
+  `SetupMode=0` observed at boot, signed chain still boots, and unsigned/
+  wrong-key UKIs are refused (G2 core evidence).
 - Bounded evidence retention (`just prune`): every successful stage build now
   prunes superseded evidence directories (keeps current + previous per stage),
   never touching device-profile-pinned provenance; the first run freed

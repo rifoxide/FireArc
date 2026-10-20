@@ -77,9 +77,9 @@ The enforced chain — reset to read-only root, nothing unsigned executing:
 | --- | --- |
 | Pinned, reproducible firmware build (host-anchored per ADR 0005) | **done** — three byte-identical builds |
 | vboot protected-RO verification of mutable firmware/payload regions | remaining — investigated and feasible; needs board-layout change + signing keys |
-| FireArc Secure Boot: PK/KEK/db/dbx enrollment, `SecureBoot=1` | remaining — blocked on the key hierarchy |
+| Signed slot-specific UKI with the verity authority embedded | **dev-signed done** — sb-signed, verified and content-checked; enforcement pending |
+| FireArc Secure Boot: PK/KEK/db/dbx enrollment, `SecureBoot=1` | **enrollment implemented** (`just enroll`, ADR 0007: PK/KEK/db + SecureBoot/SetupMode constructed offline into SMMSTORE); dbx policy and boot-time enforcement proofs remain |
 | Signed systemd-boot (normal and fallback `BOOTX64.EFI` paths) | **dev-signed done** (ADR 0006 sb key, both ESP paths); enforcement pending enrollment |
-| Signed slot-specific UKI with the verity authority embedded | **unsigned UKI done** — byte-stable, section-verified, boots the full gate; signing remains |
 | Initramfs full-root verity preverification | **done**; the authority now rides inside the UKI's .initrd section (signed once the UKI is signed) |
 | Read-only dm-verity root (slot A) | **done**; slot B and switching are update-phase work, deferred |
 
@@ -95,7 +95,11 @@ Critical path, in order:
    `SetupMode=0` and unsigned/wrong-key/modified rejection** (Phase 2 items
    12–13; Phase 4 items 5–7 and 13). **Signing done 2026-10-21** (`just
    sign`, dev sb key only; both artifacts sbverify-verified and
-   content-checked); enrollment and rejection proofs remain.
+   content-checked). **Enrollment implemented 2026-10-21** (`just enroll`,
+   ADR 0007: the variable store is constructed offline into the erased
+   SMMSTORE region — PK/KEK/db + `SecureBoot=1`/`SetupMode=0`; the payload's
+   own gate is the `SecureBoot` variable, which nothing else writes); the
+   boot-time rejection proofs remain.
 4. **vboot adoption** per the investigation: custom fmd restoring SMMSTORE,
    flash-backed VBNV, futility-signed RW regions, wrong-key/modified RW
    rejection before payload execution (Phase 2 item 6).
@@ -441,7 +445,7 @@ Check only steps supported by project code and recorded validation. A checked do
 9. [x] Define distinct key roles: firmware authorization, UEFI PK, KEK, EFI-image signing/db, RAUC bundle signing, PCR-policy signing, recovery authorization and device CA/attestation identity. ADR 0006 defines every role slot; PK, KEK and EFI-image signing (db) are generated in the dev hierarchy now, the remaining roles are bound to their phases (vboot firmware authorization — item 6; RAUC — Phase 6; PCR policy — Phase 5; recovery — Phase 9; device CA/attestation — Phases 5/8).
 10. [ ] Design the PDF's offline-root/HSM/two-person ceremony. Software tokens may rehearse interfaces but cannot satisfy a claim of hardware-backed production custody.
 11. [ ] Generate a new approved development hierarchy outside source/build trees; expose only public certificates to firmware builds and only the required private key to an isolated signing step. Generation done 2026-10-20 (ADR 0006, `just keys`): PK/KEK/image-signing RSA-3072 hierarchy plus `pk.auth`/`kek.auth`/`db.auth` time-based enrollment payloads under gitignored `secrets/` (0700/0600, idempotent, fails closed on partials). The sb-key-only exposure of the isolated signing step is demonstrated with the signing work next.
-12. [ ] Enroll FireArc PK/KEK/db and an explicit dbx policy. Remove unrelated authorization roots only after recovery and rollback implications have been reviewed.
+12. [ ] Enroll FireArc PK/KEK/db and an explicit dbx policy. Remove unrelated authorization roots only after recovery and rollback implications have been reviewed. Enrollment mechanism implemented 2026-10-21 (`just enroll`, ADR 0007): the dev PK/KEK/db and `SecureBoot=1`/`SetupMode=0` are constructed offline into the erased SMMSTORE region of the firmware ROM (`enrolled.rom`), replacing the payload's auto-enrolled defaults wholesale; format validated against the pinned EDK II sources and real payload-initialized stores (`docs/validation/secure-boot-enrollment.md`). Still open: an explicit dbx policy, removal review for the payload's default authorization roots once enforcement is proven, and boot-time acceptance evidence (step 3d).
 13. [ ] Prove `SecureBoot=1`, `SetupMode=0` and exact trust fingerprints after reboot and cold start. Test that unsigned variable updates and unauthorized key replacement are refused.
 14. [ ] Qualify authenticated PK/KEK/db/dbx updates, replay rejection and reset-to-default behavior. Ensure a firmware reset cannot silently restore broad vendor trust as the accepted appliance state.
 15. [ ] Disable EFI shell, network boot, unnecessary option ROMs and ordinary external boot in the release profile; retain a separately controlled recovery route.

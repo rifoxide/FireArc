@@ -14,7 +14,7 @@ import sys
 import tarfile
 import uuid
 
-from . import builder, device, firmware, firmware_build, firmware_layout, initrd, rootfs, sbom, sign, uki
+from . import builder, device, enroll, firmware, firmware_build, firmware_layout, initrd, rootfs, sbom, sign, uki
 from .inputs import validate_locks
 from .integrity import SafetyError, private_directory, read_json, regular_file, sha256, verify_file, write_json
 
@@ -28,6 +28,7 @@ DEPENDENCIES = {
     "firmware-layout": ("firmware-build",),
     "uki": ("tools", "root", "rootfs"),
     "sign": ("tools", "root", "uki"),
+    "enroll": ("firmware-build",),
     "device": ("tools", "rootfs", "sign"), "check-boot": ("tools", "device", "firmware-build"),
 }
 
@@ -194,15 +195,19 @@ class Pipeline:
         "firmware-build": ["locks/firmware-sources.json", "images/firmware/q35-coreboot.config",
                            "src/firearc/firmware.py", "src/firearc/inputs.py", "src/firearc/firmware_build.py"],
         "firmware-layout": ["src/firearc/firmware_layout.py"],
-        # The signing step reads the custody manifest: regenerating the
-        # development hierarchy restages every signature.
+        # The signing step and enrollment consume generated custody artifacts.
+        # Their stage inputs are the exact files read, so regenerating the
+        # hierarchy (or editing any payload) restages both.
         "sign": ["secrets/manifest.json", "src/firearc/sign.py"],
+        "enroll": ["secrets/manifest.json", "secrets/pk.esl", "secrets/kek.esl",
+                   "secrets/db.esl", "secrets/pk.auth", "secrets/kek.auth",
+                   "secrets/db.auth", "src/firearc/enroll.py"],
     }
 
     def ensure(self, stage):
         if stage in self.memo:
             return self.memo[stage]
-        if stage == "sign" and not (self.root / "secrets/manifest.json").is_file():
+        if stage in ("sign", "enroll") and not (self.root / "secrets/manifest.json").is_file():
             raise SafetyError("Development signing hierarchy absent; run just keys first")
         dependencies = {name: self.ensure(name) for name in DEPENDENCIES[stage]}
         if stage == "metadata" or stage == "packages-tools":
@@ -283,6 +288,9 @@ class Pipeline:
             return self.build / "images" / build_id, {}
         if stage == "sign":
             sign.build(root, deps["tools"]["id"], deps["root"]["id"], deps["uki"]["id"], build_id)
+            return self.build / "images" / build_id, {}
+        if stage == "enroll":
+            enroll.build(root, deps["firmware-build"]["id"], build_id)
             return self.build / "images" / build_id, {}
         if stage == "device":
             device.assemble(root, deps["tools"]["id"], deps["rootfs"]["id"],
@@ -384,6 +392,7 @@ def run(root, command, *, online=False):
         elif command == "firmware-layout": pipeline.ensure("firmware-layout")
         elif command == "uki": pipeline.ensure("uki")
         elif command == "sign": pipeline.ensure("sign")
+        elif command == "enroll": pipeline.ensure("enroll")
         elif command == "device": pipeline.ensure("device")
         elif command == "check-boot": pipeline.ensure("check-boot")
         elif command == "check-initrd": pipeline.ensure("check-initrd")

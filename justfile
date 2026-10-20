@@ -96,6 +96,12 @@ uki *options:
 sign *options:
     python3 -B scripts/firearc.py sign "$@"
 
+# Enroll the development PK/KEK/db into the firmware variable store and
+# set SecureBoot=1/SetupMode=0, producing the enrolled flash image
+# (requires `just keys`; pure offline surgery, no boot).
+enroll *options:
+    python3 -B scripts/firearc.py enroll "$@"
+
 # Assemble the development installed-device disk (ESP + slot A) from the
 # frozen payloads and signed boot artifacts.
 device *options:
