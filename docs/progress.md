@@ -113,6 +113,19 @@ qualification. The complete secured appliance is not yet implemented.
   preverify denial at the exact flipped offset, mid-session post-mapping
   corruption → dm-verity EIO. `just build` publishes `uki-a.efi`; unsigned —
   signing and Secure Boot enrollment are the next chain links.
+- **Development key hierarchy generated** (chain step 3a; PLAN Phase 2 items
+  8/9 annotated, 11 in progress; ADR 0006, `just keys`): three dev roles —
+  PK, KEK and the EFI image-signing key whose certificate becomes the db
+  content — RSA-3072 self-signed, generated inside the pinned tools
+  container (openssl 3.5.7 / sbsigntool 0.9.4), stored under gitignored
+  `secrets/` (0700/0600, outside source/build trees, never committed, fails
+  closed on partial hierarchies). Time-based enrollment payloads follow the
+  standard chain (`pk.auth` self-signed, `kek.auth` by PK, `db.auth` by KEK)
+  so any enrollment mechanism can consume them. Public fingerprints are
+  recorded in the ADR; production custody/ceremony remain open (item 10).
+  Next: sign systemd-boot + UKI with the sb key, enroll PK/KEK/db into the
+  device variable store, then prove `SecureBoot=1`/`SetupMode=0` with
+  unsigned- and wrong-key-rejection tests (G2 core).
 - Bounded evidence retention (`just prune`): every successful stage build now
   prunes superseded evidence directories (keeps current + previous per stage),
   never touching device-profile-pinned provenance; the first run freed

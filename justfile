@@ -83,6 +83,10 @@ device-restore *options:
 prune *options:
     python3 -B scripts/firearc.py prune "$@"
 
+# Generate (once) the development signing hierarchy under gitignored secrets/.
+keys:
+    python3 -B scripts/firearc.py keys
+
 # Build the unsigned slot-A UKI from the frozen payloads (pinned ukify).
 uki *options:
     python3 -B scripts/firearc.py uki "$@"

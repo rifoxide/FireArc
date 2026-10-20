@@ -6,7 +6,7 @@ from pathlib import Path
 import subprocess
 import sys
 
-from . import builder, pipeline, profile
+from . import builder, keys, pipeline, profile
 from .host import doctor, scan_repository
 from .inputs import validate_locks
 from .integrity import SafetyError
@@ -19,6 +19,8 @@ def main():
     commands = parser.add_subparsers(dest="command", required=True)
     for name in ("doctor", "verify-inputs", "secrets", "status"):
         commands.add_parser(name)
+    keys_command = commands.add_parser(
+        "keys", help="Generate (once) the development signing hierarchy under secrets/")
     for name in ("bootstrap", "build-tools", "build-root", "build-rootfs", "build", "sbom", "firmware-sources", "firmware-build", "firmware-layout", "uki", "device", "check-boot", "check-initrd", "check-rootfs", "verify-build"):
         command = commands.add_parser(name)
         command.add_argument("--online", action="store_true", help="Allow pinned dependency downloads")
@@ -67,6 +69,10 @@ def main():
             builder.root_lock(ROOT)
             result = {"passed": True, "scope": "Specification and project input locks"}
         elif args.command == "secrets": result = scan_repository(ROOT)
+        elif args.command == "keys":
+            with pipeline.project_lock(ROOT):
+                pipe = pipeline.Pipeline(ROOT)
+                result = keys.ensure(ROOT, pipe.ensure("tools")["id"])
         elif args.command == "clean":
             with pipeline.project_lock(ROOT): pipeline.clean(ROOT, confirmed=args.yes)
             result = {"passed": True, "removed": "build/"}
