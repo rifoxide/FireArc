@@ -56,6 +56,12 @@ inside the UKI built by `just uki` (byte-identical rebuild, every payload
 section verified against its input). All three disciplines below re-passed
 unchanged on this layout.
 
+**Signed artifacts (2026-10-21):** the loader (both ESP paths) and the UKI
+are development-signed (`just sign`, ADR 0006 sb key; sbverify-verified and
+content-checked). All three disciplines re-passed unchanged: Secure Boot is
+still unenforced, so the signatures are carried but not yet required — the
+enrollment and rejection proofs are tracked separately.
+
 - **Positive boot:** full 4 GiB verity preverification, dm-verity mapping,
   read-only ext4 sysroot mount, the self-verified terminal marker, and —
   after dropping caches — a clean full re-read of the verity device

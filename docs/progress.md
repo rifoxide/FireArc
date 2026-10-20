@@ -123,9 +123,24 @@ qualification. The complete secured appliance is not yet implemented.
   standard chain (`pk.auth` self-signed, `kek.auth` by PK, `db.auth` by KEK)
   so any enrollment mechanism can consume them. Public fingerprints are
   recorded in the ADR; production custody/ceremony remain open (item 10).
-  Next: sign systemd-boot + UKI with the sb key, enroll PK/KEK/db into the
-  device variable store, then prove `SecureBoot=1`/`SetupMode=0` with
-  unsigned- and wrong-key-rejection tests (G2 core).
+- **Boot artifacts signed and boot-qualified** (chain step 3b; PLAN Phase 4
+  item 5 annotated; `just sign`): a new isolated signing stage signs the
+  UKI and the systemd-boot loader with the development sb key — the signing
+  container mounts only `sb.key`/`sb.crt` read-only, satisfying the plan's
+  exposure rule; PK/KEK material never enters it. Both artifacts are
+  sbverify-verified in-stage and structurally content-checked (only the PE
+  checksum and Certificate-Table entry may differ; the appended region must
+  be exactly the described certificate). The signature layer is honestly
+  recorded as non-byte-reproducible (sbsign embeds signing time);
+  reproducibility attaches to the covered content, which `just reproduce`
+  compares. The device stage now refuses unsigned artifacts, and the full
+  three-discipline check-boot gate re-passed on the signed disk (Secure
+  Boot still unenforced — signatures are carried, not yet required).
+  `just build` publishes `uki-a-signed.efi`; regenerating keys restages
+  signatures automatically (custody manifest is a stage input).
+  Next: enroll PK/KEK/db into the device variable store (3c) and prove
+  `SecureBoot=1`/`SetupMode=0` with unsigned- and wrong-key-rejection
+  tests (3d, G2 core).
 - Bounded evidence retention (`just prune`): every successful stage build now
   prunes superseded evidence directories (keeps current + previous per stage),
   never touching device-profile-pinned provenance; the first run freed

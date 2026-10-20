@@ -91,7 +91,13 @@ keys:
 uki *options:
     python3 -B scripts/firearc.py uki "$@"
 
-# Assemble the unsigned development installed-device disk (ESP + slot A).
+# Sign the UKI and systemd-boot loader with the development sb key
+# (requires `just keys`; the signing container sees only sb.key/sb.crt).
+sign *options:
+    python3 -B scripts/firearc.py sign "$@"
+
+# Assemble the development installed-device disk (ESP + slot A) from the
+# frozen payloads and signed boot artifacts.
 device *options:
     python3 -B scripts/firearc.py device "$@"
 

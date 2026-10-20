@@ -21,7 +21,7 @@ def main():
         commands.add_parser(name)
     keys_command = commands.add_parser(
         "keys", help="Generate (once) the development signing hierarchy under secrets/")
-    for name in ("bootstrap", "build-tools", "build-root", "build-rootfs", "build", "sbom", "firmware-sources", "firmware-build", "firmware-layout", "uki", "device", "check-boot", "check-initrd", "check-rootfs", "verify-build"):
+    for name in ("bootstrap", "build-tools", "build-root", "build-rootfs", "build", "sbom", "firmware-sources", "firmware-build", "firmware-layout", "uki", "sign", "device", "check-boot", "check-initrd", "check-rootfs", "verify-build"):
         command = commands.add_parser(name)
         command.add_argument("--online", action="store_true", help="Allow pinned dependency downloads")
     for name in ("clean", "reproduce"):

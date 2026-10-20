@@ -1,21 +1,22 @@
 """Development installed-device profile and QEMU Q35 boot verification.
 
-Assembles an unsigned development disk (GPT ESP + FIREARC_ROOT_A/FIREARC_HASH_A)
-from the frozen OS payloads and the unsigned slot-A UKI, boots it under the
-pinned host QEMU with the self-built coreboot/EDK II firmware and asserts
-the initrd integrity gate outcome on the serial console, including a
-corrupted-root negative control. The ESP carries systemd-boot plus one
-Unified Kernel Image as a type-2 loader entry; the kernel, command line,
-verity authority and development unit all ride inside the UKI, so the ESP
-holds no separate kernel or initramfs. Each booted flash copy must also
+Assembles a development disk (GPT ESP + FIREARC_ROOT_A/FIREARC_HASH_A) from
+the frozen OS payloads and the development-signed boot artifacts, boots it
+under the pinned host QEMU with the self-built coreboot/EDK II firmware and
+asserts the initrd integrity gate outcome on the serial console, including
+a corrupted-root negative control. The ESP carries the sb-signed
+systemd-boot loader plus one signed Unified Kernel Image as a type-2 loader
+entry; the kernel, command line, verity authority and development unit all
+ride inside the UKI, so the ESP holds no unsigned kernel or initramfs.
+Secure Boot is not yet enforced: the device variable store still has to be
+enrolled with the development PK/KEK/db. Each booted flash copy must also
 differ from the pristine ROM only inside the SMMSTORE variable region:
 guest firmware writes may never touch code, flash-map, preserved or
 unmapped bytes. The firmware image is the monolithic 8 MiB ROM from the
 firmware-build stage; its SMMSTORE region carries the writable UEFI
 variable store, so each run boots a private writable copy of the ROM.
-This is a development harness profile: it is not Secure Boot, not the
-production provisioning layout and not a signing or physical-device
-qualification.
+This is a development harness profile: it is not production provisioning,
+not a production-custody claim and not a physical-device qualification.
 """
 
 import os
@@ -418,20 +419,21 @@ def _stage_outputs(root, label, expected, parent=None):
     return source, output, result
 
 
-def assemble(root, tools_label, root_label, rootfs_label, uki_label, label):
-    """Build the unsigned development disk from the frozen payloads and UKI."""
+def assemble(root, tools_label, rootfs_label, sign_label, label):
+    """Build the development disk from the frozen payloads and signed boot artifacts."""
     builder.verify_tools(root, tools_label)
-    root_source, root_output, root_result = _stage_outputs(root, root_label, "appliance-root")
     payload_source, payload_output, payload_result = _stage_outputs(root, rootfs_label, "rootfs")
     if not payload_result.get("full_verity_verified"):
         raise SafetyError("Expected verified verity payloads for device assembly")
-    uki_source, uki_output, uki_result = _stage_outputs(root, uki_label, "uki")
-    uki = regular_file(uki_output, UKI_ARTIFACT)
-    if uki_result.get("artifacts", {}).get(UKI_ARTIFACT) != sha256(uki):
-        raise SafetyError("UKI stage does not vouch for the UKI artifact")
-    if not uki_result.get("byte_identical_rebuild") or not uki_result.get("sections_verified"):
-        raise SafetyError("Expected a byte-stable, section-verified UKI")
-    archive = regular_file(root_output, "firearc-root.tar")
+    sign_source, sign_output, sign_result = _stage_outputs(root, sign_label, "sign")
+    uki = regular_file(sign_output, UKI_ARTIFACT)
+    loader = regular_file(sign_output, "systemd-bootx64.efi")
+    for name, digest in ((UKI_ARTIFACT, uki), ("systemd-bootx64.efi", loader)):
+        if sign_result.get("artifacts", {}).get(name) != sha256(digest):
+            raise SafetyError(f"Signing stage does not vouch for {name}")
+    if not sign_result.get("signed") or not sign_result.get("signatures_verified") \
+            or not sign_result.get("covers_exact_unsigned_content"):
+        raise SafetyError("Expected verified, content-checked signatures for the ESP")
     data = regular_file(payload_output, payload_result["root_payload"])
     tree = regular_file(payload_output, "root.verity")
     authority = read_json(regular_file(payload_output, "verity-authority.json"))
@@ -446,9 +448,12 @@ def assemble(root, tools_label, root_label, rootfs_label, uki_label, label):
     for name in ("EFI/BOOT", "EFI/systemd", "EFI/Linux", "loader"):
         (staging / name).mkdir(parents=True, mode=0o700)
     (staging / "loader/loader.conf").write_text(LOADER_CONF)
-    # The whole boot payload — kernel, command line, verity authority and
-    # development unit — is this one UKI; the ESP carries no separate kernel
-    # or initramfs.
+    # The whole boot payload — loader, kernel, command line, verity authority
+    # and development unit — is signed development content (ADR 0006 keys);
+    # the ESP carries no unsigned kernel or initramfs. Secure Boot is still
+    # unenforced until the variable store is enrolled.
+    shutil.copyfile(loader, staging / "EFI/BOOT/BOOTX64.EFI")
+    shutil.copyfile(loader, staging / "EFI/systemd/systemd-bootx64.efi")
     shutil.copyfile(uki, staging / ESP_UKI_PATH)
     (work / "gpt.sfdisk").write_text(sfdisk_script())
     workspace = work / "workspace"
@@ -457,19 +462,11 @@ def assemble(root, tools_label, root_label, rootfs_label, uki_label, label):
     output.mkdir(mode=0o700)
     options = builder.docker_args(image) + [
         "--env", "LC_ALL=C",
-        "--mount", f"type=bind,src={root_output},dst=/root-output,readonly",
         "--mount", f"type=bind,src={payload_output},dst=/payload,readonly",
         "--mount", f"type=bind,src={staging},dst=/staging",
         "--mount", f"type=bind,src={workspace},dst=/workspace",
         "--mount", f"type=bind,src={work},dst=/work,readonly", image]
     try:
-        # The loader binary is taken from the exact root archive this device uses.
-        builder.logged(work, "extract-systemd-boot", options + [
-            "tar", "--extract", "--wildcards", "--file", "/root-output/firearc-root.tar",
-            "--directory", "/workspace", "*/boot/efi/systemd-bootx64.efi"], timeout=300)
-        loader = regular_file(workspace / "usr/lib/systemd/boot/efi", "systemd-bootx64.efi")
-        shutil.copyfile(loader, staging / "EFI/BOOT/BOOTX64.EFI")
-        shutil.copyfile(loader, staging / "EFI/systemd/systemd-bootx64.efi")
         builder.logged(work, "format-esp", options + [
             "truncate", "--size", f"{ESP_MIB}M", "/workspace/esp.img"], timeout=120)
         builder.logged(work, "mkfs-esp", options + [
@@ -501,30 +498,34 @@ def assemble(root, tools_label, root_label, rootfs_label, uki_label, label):
             "partitions": [{"name": name, "start_sector": start, "sectors": size,
                             "type": kind, "uuid": unique} for name, start, size, kind, unique in PARTITIONS],
             "kernel_cmdline": KERNEL_CMDLINE,
-            "inputs": {"root_label": root_label, "rootfs_label": rootfs_label,
-                       "uki_label": uki_label,
-                       "root_tar_sha256": sha256(archive), "uki_sha256": sha256(uki),
+            "inputs": {"rootfs_label": rootfs_label, "sign_label": sign_label,
+                       "uki_sha256": sha256(uki), "loader_sha256": sha256(loader),
+                       "signer_fingerprint": sign_result.get("signer_fingerprint"),
                        "root_payload_sha256": sha256(data), "verity_sha256": sha256(tree),
                        "authority_sha256": sha256(payload_output / "verity-authority.json")},
-            "esp": {"loader": "systemd-boot from the root archive", "size_mib": ESP_MIB,
+            "esp": {"loader": "systemd-boot, development-signed (ADR 0006 sb key)",
+                    "size_mib": ESP_MIB,
                     "uki": {"path": ESP_UKI_PATH, "sha256": sha256(uki),
-                            "entry": "systemd-boot type-2 auto-entry (unsigned dev UKI)"},
+                            "entry": "systemd-boot type-2 auto-entry (signed dev UKI)",
+                            "signatures_verified": True},
                     "files": sorted(str(item.relative_to(staging)) for item in staging.rglob("*")
                                     if item.is_file())},
-            "scope": "Unsigned development installed-device profile for the QEMU harness; "
-                     "not a release artifact and not production provisioning",
+            "scope": "Development installed-device profile (signed boot artifacts, "
+                     "Secure Boot not yet enrolled); not a release artifact and "
+                     "not production provisioning",
         }
         write_json(work / "device.json", manifest)
         write_json(work / "result.json", {"passed": True, "artifacts": {"device.raw": sha256(disk)},
                                           "device_bytes": DISK_MIB * MIB,
                                           "boot_chain_qualified": False,
-                                          "scope": "Offline development disk assembly; no boot executed"})
+                                          "scope": "Offline development disk assembly with signed "
+                                                   "boot artifacts; no boot executed"})
     except Exception as error:
         write_json(work / "result.json", {"passed": False, "error": str(error),
                                           "boot_chain_qualified": False})
         raise
     return {"passed": True, "evidence": str(work),
-            "scope": "Development disk assembled; unsigned and not yet booted"}
+            "scope": "Development disk assembled with signed boot artifacts; not yet booted"}
 
 
 def check_boot(root, tools_label, device_label, firmware_label, label):

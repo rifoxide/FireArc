@@ -14,7 +14,7 @@ import sys
 import tarfile
 import uuid
 
-from . import builder, device, firmware, firmware_build, firmware_layout, initrd, rootfs, sbom, uki
+from . import builder, device, firmware, firmware_build, firmware_layout, initrd, rootfs, sbom, sign, uki
 from .inputs import validate_locks
 from .integrity import SafetyError, private_directory, read_json, regular_file, sha256, verify_file, write_json
 
@@ -27,7 +27,8 @@ DEPENDENCIES = {
     "firmware-build": ("firmware-sources",),
     "firmware-layout": ("firmware-build",),
     "uki": ("tools", "root", "rootfs"),
-    "device": ("tools", "root", "rootfs", "uki"), "check-boot": ("tools", "device", "firmware-build"),
+    "sign": ("tools", "root", "uki"),
+    "device": ("tools", "rootfs", "sign"), "check-boot": ("tools", "device", "firmware-build"),
 }
 
 
@@ -193,11 +194,16 @@ class Pipeline:
         "firmware-build": ["locks/firmware-sources.json", "images/firmware/q35-coreboot.config",
                            "src/firearc/firmware.py", "src/firearc/inputs.py", "src/firearc/firmware_build.py"],
         "firmware-layout": ["src/firearc/firmware_layout.py"],
+        # The signing step reads the custody manifest: regenerating the
+        # development hierarchy restages every signature.
+        "sign": ["secrets/manifest.json", "src/firearc/sign.py"],
     }
 
     def ensure(self, stage):
         if stage in self.memo:
             return self.memo[stage]
+        if stage == "sign" and not (self.root / "secrets/manifest.json").is_file():
+            raise SafetyError("Development signing hierarchy absent; run just keys first")
         dependencies = {name: self.ensure(name) for name in DEPENDENCIES[stage]}
         if stage == "metadata" or stage == "packages-tools":
             source = sha256(self.root / "locks/debian-build.json")
@@ -275,9 +281,12 @@ class Pipeline:
         if stage == "uki":
             uki.build(root, deps["tools"]["id"], deps["root"]["id"], deps["rootfs"]["id"], build_id)
             return self.build / "images" / build_id, {}
+        if stage == "sign":
+            sign.build(root, deps["tools"]["id"], deps["root"]["id"], deps["uki"]["id"], build_id)
+            return self.build / "images" / build_id, {}
         if stage == "device":
-            device.assemble(root, deps["tools"]["id"], deps["root"]["id"], deps["rootfs"]["id"],
-                            deps["uki"]["id"], build_id)
+            device.assemble(root, deps["tools"]["id"], deps["rootfs"]["id"],
+                            deps["sign"]["id"], build_id)
             return self.build / "images" / build_id, {}
         if stage == "check-boot":
             device.check_boot(root, deps["tools"]["id"], deps["device"]["id"],
@@ -336,6 +345,7 @@ class Pipeline:
         root = self.ensure("root")
         filesystem = self.ensure("rootfs")
         image = self.ensure("uki")
+        signatures = self.ensure("sign")
         inventory = self.ensure("sbom")
         root_output = self.build / "images" / root["id"] / "output"
         fs_output = self.build / "images" / filesystem["id"] / "output"
@@ -344,6 +354,7 @@ class Pipeline:
                    "initrd.img": root_output / "firearc-initrd.img", "root.ext4": fs_output / fs_result["root_payload"],
                    "root.verity": fs_output / "root.verity", "verity-authority.json": fs_output / "verity-authority.json",
                    "uki-a.efi": self.build / "images" / image["id"] / "output" / device.UKI_ARTIFACT,
+                   "uki-a-signed.efi": self.build / "images" / signatures["id"] / "output" / device.UKI_ARTIFACT,
                    "sbom.json": builder.parent(self.root) / inventory["id"] / "output" / "sbom.json"}
         directory = private_directory(self.build / "output", create=True)
         for name, source in outputs.items():
@@ -372,6 +383,7 @@ def run(root, command, *, online=False):
         elif command == "firmware-build": pipeline.ensure("firmware-build")
         elif command == "firmware-layout": pipeline.ensure("firmware-layout")
         elif command == "uki": pipeline.ensure("uki")
+        elif command == "sign": pipeline.ensure("sign")
         elif command == "device": pipeline.ensure("device")
         elif command == "check-boot": pipeline.ensure("check-boot")
         elif command == "check-initrd": pipeline.ensure("check-initrd")
@@ -400,11 +412,20 @@ def reproduce(root, *, confirmed=False):
             rounds.append({"round": number, "outputs": outputs, "verified": True})
         if project_digest(root) != initial:
             raise SafetyError("Source/configuration changed between reproduction rounds")
-        identical = rounds[0]["outputs"] == rounds[1]["outputs"]
+        # The signed boot artifacts are excluded from round comparison: sbsign
+        # embeds a signing time, so identical content yields differing bytes.
+        # Reproducibility attaches to the covered content, which is compared.
+        comparable = [{name: digest for name, digest in round_["outputs"].items()
+                       if name != "uki-a-signed.efi"} for round_ in rounds]
+        identical = comparable[0] == comparable[1]
         report = {"schema": 1, "passed": identical, "clean_download_build_rounds": rounds,
                   "source_fingerprint": initial, "host_python": sys.version,
+                  "compared_outputs": sorted(comparable[0]),
+                  "excluded_from_comparison": {"uki-a-signed.efi":
+                                               "signature layer embeds signing time"},
                   "scope": "Root/kernel/initramfs/ext4/verity payloads and the unsigned UKI; "
-                           "firmware signing/device lifecycle pending",
+                           "the signed artifact's covered content is compared via uki-a.efi; "
+                           "firmware/device lifecycle pending",
                   "shared_docker_content_cache_preserved": True}
         write_json(root / "build/reproducibility.json", report)
         if not identical:

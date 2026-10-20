@@ -78,7 +78,7 @@ The enforced chain — reset to read-only root, nothing unsigned executing:
 | Pinned, reproducible firmware build (host-anchored per ADR 0005) | **done** — three byte-identical builds |
 | vboot protected-RO verification of mutable firmware/payload regions | remaining — investigated and feasible; needs board-layout change + signing keys |
 | FireArc Secure Boot: PK/KEK/db/dbx enrollment, `SecureBoot=1` | remaining — blocked on the key hierarchy |
-| Signed systemd-boot (normal and fallback `BOOTX64.EFI` paths) | remaining |
+| Signed systemd-boot (normal and fallback `BOOTX64.EFI` paths) | **dev-signed done** (ADR 0006 sb key, both ESP paths); enforcement pending enrollment |
 | Signed slot-specific UKI with the verity authority embedded | **unsigned UKI done** — byte-stable, section-verified, boots the full gate; signing remains |
 | Initramfs full-root verity preverification | **done**; the authority now rides inside the UKI's .initrd section (signed once the UKI is signed) |
 | Read-only dm-verity root (slot A) | **done**; slot B and switching are update-phase work, deferred |
@@ -93,7 +93,9 @@ Critical path, in order:
    (byte-identical rebuild, sections verified, type-2 boot gate passed).
 3. **Sign boot manager and UKIs, enroll PK/KEK/db, prove `SecureBoot=1`,
    `SetupMode=0` and unsigned/wrong-key/modified rejection** (Phase 2 items
-   12–13; Phase 4 items 5–7 and 13).
+   12–13; Phase 4 items 5–7 and 13). **Signing done 2026-10-21** (`just
+   sign`, dev sb key only; both artifacts sbverify-verified and
+   content-checked); enrollment and rejection proofs remain.
 4. **vboot adoption** per the investigation: custom fmd restoring SMMSTORE,
    flash-backed VBNV, futility-signed RW regions, wrong-key/modified RW
    rejection before payload execution (Phase 2 item 6).
@@ -487,7 +489,7 @@ Check only steps supported by project code and recorded validation. A checked do
 3. [x] Align/qualify systemd-boot, systemd-stub, ukify, measurement tools and target cryptsetup-related systemd versions using pinned builder inputs. Aligned from the single pinned snapshot: root archive carries systemd/systemd-boot/stub 257.13-1~deb13u1, tools image carries ukify/systemd-cryptsetup at the same version; ukify construction is byte-stable and section-verified (Phase 3 item 11). Measurement (systemd-measure/PCR) and signing qualification are later items (4 sub-bullet, 5; Phase 5).
 4. [ ] Build UKIs with ukify and inspect every embedded section. Include signed root authority and `rauc.slot=` for the actual slot. Unsigned development form implemented by `just uki`: sections inspected and verified against inputs, `rauc.slot=A` embedded, and the UKI boots the full three-discipline check-boot gate via a systemd-boot type-2 entry (no separate kernel/initramfs on the ESP). Signed root authority and PE signatures remain.
    - Final pipeline, once Phase 5 adds PCR authorization: freeze root -> generate verity -> finalize kernel/initramfs/command-line/public-policy inputs -> calculate/sign the intended PCR states -> embed PCR signatures -> apply the final PE signature. Use ukify's supported measurement rules to avoid circular signing; never alter covered sections afterward. Rebuild all dependent signatures if any input changes.
-5. [ ] Sign the boot manager and both UKIs with approved EFI-image signing credentials; verify signatures before image assembly.
+5. [ ] Sign the boot manager and both UKIs with approved EFI-image signing credentials; verify signatures before image assembly. Development form implemented 2026-10-21 (`just sign`): the isolated signing container receives only the development sb key/cert (ADR 0006), signs systemd-boot (both ESP paths) and the slot-A UKI, each sbverify-verified and structurally content-checked (apart from the PE checksum and Certificate Table entry, the signed image equals the byte-stable unsigned artifact, with the appended region exactly the described certificate); the device stage refuses unsigned artifacts now. Slot B and production-approved credentials remain open; the signature layer is honestly non-reproducible (signing time) while covered content stays byte-stable.
 6. [ ] Put **signed systemd-boot** at both the normal firmware entry and fallback `BOOTX64.EFI` path. Remove the direct-UKI bypass from the normal installed-device profile.
 7. [ ] Prove the observed path is coreboot -> EDK II -> systemd-boot -> selected UKI -> verified root. Record boot-manager/stub/slot identities; a successful direct UKI launch does not pass this gate.
 8. [ ] Lock down menu editing, unexpected automatic entries and external inputs. Test attempts to override root, init, verity enforcement, lockdown and emergency targets through LoadOptions/addons/companion resources.
