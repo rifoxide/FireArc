@@ -86,6 +86,11 @@ qualification. The complete secured appliance is not yet implemented.
   records that the initial firmware verifier in QEMU is host-anchored only —
   no verified-boot claims until a protected-RO layout, signing keys and
   their own qualification exist.
+- vboot adoption investigated (PLAN Phase 2 item 5,
+  `docs/validation/firmware-vboot.md`): the pinned board ships upstream vboot
+  machinery (config + RW_A/RW_AB 8 MiB layouts); adoption needs a custom fmd
+  restoring SMMSTORE, flash-backed VBNV under QEMU, a recovery payload
+  decision and — the blocker — a vboot signing key hierarchy.
 - Bounded evidence retention (`just prune`): every successful stage build now
   prunes superseded evidence directories (keeps current + previous per stage),
   never touching device-profile-pinned provenance; the first run freed

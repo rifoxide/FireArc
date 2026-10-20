@@ -6,6 +6,7 @@
 | Root, initramfs and integrity payloads | [Root and initramfs](appliance-root.md) |
 | Development device assembly and QEMU boot gate | [Device boot](device-boot.md) |
 | Firmware flash layout and boot write confinement | [Firmware layout](firmware-layout.md) |
+| vboot adoption investigation (no adoption yet) | [Firmware vboot](firmware-vboot.md) |
 | Persistent installed-device profile with swtpm | [Device profile](device-profile.md) |
 
 The preliminary CycloneDX inventory (`just sbom`) is generated deterministically
