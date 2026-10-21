@@ -224,6 +224,22 @@ qualification. The complete secured appliance is not yet implemented.
   initramfs gate performs full verity preverification, read-only mapping and
   sysroot mount, with a corrupted-root negative control that is denied at the
   exact flip offset. Runtime execution found and fixed four real gate defects.
+- Phase 5 measurement groundwork: the boot marker unit dumps the firmware TCG
+  event log from securityfs to serial (kernel sysfs per-PCR reads deadlock
+  under this QEMU tpm-tis setup after the first read), and
+  `src/firearc/tpm_evidence.py` extracts, parses (crypto-agile) and replays
+  the banks host-side, with a producer map and an expected/observed
+  sensitivity table in
+  [TPM measurement validation](validation/tpm-measurements.md). Two honest
+  negatives shape the future PCR policy: vboot firmware identity is not
+  measured, and UKI signature sections are skipped (the db digest anchor owns
+  both distinctions).
+- Operations note (recorded after investigating): external `docker image
+  prune` deleted the digest-pinned tagless tools and SDK images; the harness
+  now treats a cached tools stage whose image is absent from docker as stale
+  and rebuilds it. Docker image ids are not rebuild-stable (the rebuilt tools
+  image got a new digest while its pinned package inputs stayed identical),
+  so the reproducibility claim lives in the package pins, not the image id.
 
 ## Validation
 
@@ -244,13 +260,13 @@ byte-reproducibility result is implied by the implementation list above.
 
 ## Next gates
 
-1. Assemble slot-specific signed UKI inputs and qualify the signed boot path;
-   post-mapping runtime corruption reads and the authenticated fallback
-   interface remain untested.
-2. Implement the pinned source-built firmware path and qualify firmware trust,
-   authenticated variables and unique TPM ACPI/event-log ownership.
-3. Implement installed A/B storage, TPM-bound LUKS2/escrow, RAUC activation/health/
-   rollback, attestation, restricted recovery and release hardening/CI.
+1. Phase 5 items 5–15: signed PCR 11 authorizations (per the sensitivity
+   table: bind on PCR 7 + 11, loader context PCR 9; never claim firmware
+   identity or signature presence via PCR), then per-device LUKS2 volumes,
+   escrow, `systemd-cryptenroll` with the signed policy, crypttab/unlock
+   ordering, and the move/refusal test matrix.
+2. Phase 6+ (RAUC updates, health/rollback, attestation, recovery, release
+   hardening/CI) per PLAN §1.2 after the data-unlock chain lands.
 G0/G1/G3 and later acceptance gates remain open. Hardware, legal review,
 production signing custody and external design documents are still dependencies.
 Git commit signing is temporarily deferred under ADR 0004; boot/update/release
