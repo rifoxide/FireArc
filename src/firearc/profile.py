@@ -34,7 +34,7 @@ import subprocess
 import time
 import uuid
 
-from . import builder, device, firmware_layout, pipeline
+from . import builder, device, firmware_layout, luks, pipeline
 from .inputs import load_lock
 from .integrity import (
     SafetyError, private_directory, read_json, regular_file, sha256, verify_file,
@@ -114,10 +114,12 @@ def provision(root, name, *, replace=False):
     # The profile's firmware is the vboot-signed image (our GBB root): the
     # machine's flash carries verified RW sections from cold start.
     firmware_label = pipe.ensure("firmware-sign")["id"]
-    return _provision(root, name, device_label, firmware_label, replace=replace)
+    tools_label = pipe.ensure("tools")["id"]
+    return _provision(root, name, device_label, firmware_label, tools_label,
+                      replace=replace)
 
 
-def _provision(root, name, device_label, firmware_label, *, replace=False):
+def _provision(root, name, device_label, firmware_label, tools_label, *, replace=False):
     device_source, device_output, device_result = device._stage_outputs(root, device_label, "device")
     disk = regular_file(device_output, "device.raw")
     if device_result.get("artifacts", {}).get("device.raw") != sha256(disk):
@@ -137,6 +139,10 @@ def _provision(root, name, device_label, firmware_label, *, replace=False):
     shutil.copyfile(rom, target / "flash.rom")
     (target / "tpm").mkdir(mode=0o700)
     (target / "runs").mkdir(mode=0o700)
+    # Per-device LUKS2 data volume: created exactly here, from the blank
+    # factory region, with unique volume material and a separate recovery
+    # credential (Phase 5 item 6). Escrow of the credential is item 7.
+    data = luks.provision_data(root, target, tools_label)
     profile = {
         "schema": PROFILE_SCHEMA, "name": name,
         "created_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -148,7 +154,13 @@ def _provision(root, name, device_label, firmware_label, *, replace=False):
         },
         "boots": 0,
         "tpm": {"interface": "tpm-tis", "state_dir": "tpm", "backend": "swtpm --tpm2"},
-        "operations": [{"op": "provision", "utc": datetime.now(timezone.utc).isoformat(timespec="seconds")}],
+        "data": {"volume": "luks2", "uuid": data["uuid"],
+                 "region_sha256": data["data_region_sha256"],
+                 "keyslots": data["keyslots"],
+                 "recovery_credential": {**data["recovery_credential"]},
+                 "evidence": "provision/data.json"},
+        "operations": [{"op": "provision", "utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                        "data_volume_uuid": data["uuid"]}],
         "scope": "Development persistent device state (disk, firmware variables, TPM); "
                  "not a reproducible payload and not production provisioning",
     }
@@ -178,6 +190,25 @@ def load(root, name):
             or flash.stat().st_size != provenance.get("rom_bytes") \
             or provenance.get("rom_bytes") != device.FIRMWARE_BYTES:
         raise SafetyError("Device profile storage has unexpected geometry")
+    data = profile.get("data")
+    if data:
+        # Provisioned data volume: the sealed region is device identity. It
+        # must still match the provisioning evidence, and the recovery
+        # credential must remain where the profile recorded it.
+        if data.get("volume") != "luks2" or not data.get("uuid") \
+                or data.get("keyslots") != ["0"]:
+            raise SafetyError("Provisioned data volume does not match the "
+                              "per-device LUKS2 provisioning contract")
+        if luks.region_digest(disk, luks.DATA_OFFSET) != data.get("region_sha256"):
+            raise SafetyError("LUKS2 data volume region diverged from the "
+                              "provisioning evidence; re-provision explicitly")
+        credential = regular_file(target, data.get("recovery_credential", {}).get("path", ""))
+        import stat as stat_module
+        if stat_module.S_IMODE(credential.lstat().st_mode) != 0o600:
+            raise SafetyError("Recovery credential must be a 0600 file")
+        if hashlib.sha256(credential.read_bytes()).hexdigest() \
+                != data["recovery_credential"].get("sha256"):
+            raise SafetyError("Recovery credential does not match its recorded digest")
     return target, profile
 
 
@@ -229,6 +260,13 @@ def _assert_session_started_from_expected_state(prepared):
         "Firmware variable-store region")
     assert_identity_unchanged(expected.get("tpm_sha256"), tpm_digests(prepared["tpm_dir"]),
                               "TPM state")
+    if expected.get("data_sha256"):
+        # Nothing in the boot path may touch the sealed data volume; the
+        # per-device LUKS2 region is identity, not scratch space.
+        assert_identity_unchanged(
+            expected["data_sha256"],
+            luks.region_digest(prepared["disk"], luks.DATA_OFFSET),
+            "LUKS2 data volume region")
 
 
 def _assert_boot_markers(text, what):
@@ -341,6 +379,8 @@ def _finish_session(prepared, run_dir, serial_text, record, session):
         "smmstore_sha256_after": area_digest(flash.read_bytes(), layout,
                                              firmware_layout.VARIABLE_STORE_AREA),
         "tpm_sha256_after": tpm_digests(prepared["tpm_dir"]),
+        "data_sha256_after": (luks.region_digest(prepared["disk"], luks.DATA_OFFSET)
+                              if prepared["profile"].get("data") else None),
         "disk_sha256": sha256(prepared["disk"]),
         "flash_write_confinement": confinement,
         "qemu_sha256": prepared["pins"]["qemu-system-x86_64"]["sha256"],
@@ -379,6 +419,8 @@ def _record_failure(prepared, run_dir, op, error, session, session_ran):
                 prepared["flash"].read_bytes(), prepared["layout"],
                 firmware_layout.VARIABLE_STORE_AREA),
             "tpm_sha256_after": tpm_digests(prepared["tpm_dir"]),
+            "data_sha256_after": (luks.region_digest(prepared["disk"], luks.DATA_OFFSET)
+                                  if prepared["profile"].get("data") else None),
             "menu_unstick_keypresses": getattr(session, "keypresses", None),
             "scope": "Failed session; observed state adopted as the new baseline",
         }
@@ -386,7 +428,8 @@ def _record_failure(prepared, run_dir, op, error, session, session_ran):
         profile["boots"] = profile.get("boots", 0) + 1
         profile["state_after_last_boot"] = {
             "smmstore_sha256": record["smmstore_sha256_after"],
-            "tpm_sha256": record["tpm_sha256_after"]}
+            "tpm_sha256": record["tpm_sha256_after"],
+            "data_sha256": record.get("data_sha256_after")}
         record_operation(profile, op, run=int(run_dir.name), failed=True,
                          error=str(error)[:200])
     profile["last_error"] = str(error)
@@ -470,7 +513,8 @@ def boot(root, name, *, count=2, tcg=False):
             profile["boots"] = number
             profile["state_after_last_boot"] = {
                 "smmstore_sha256": record["smmstore_sha256_after"],
-                "tpm_sha256": record["tpm_sha256_after"]}
+                "tpm_sha256": record["tpm_sha256_after"],
+                "data_sha256": record.get("data_sha256_after")}
             record_operation(profile, "boot", run=number)
             save_json(prepared["target"] / "profile.json", profile)
             write_json(run_dir / "run.json", record)
@@ -555,7 +599,8 @@ def reboot(root, name, *, resets=2):
         profile["boots"] = profile.get("boots", 0) + 1
         profile["state_after_last_boot"] = {
             "smmstore_sha256": record["smmstore_sha256_after"],
-            "tpm_sha256": record["tpm_sha256_after"]}
+            "tpm_sha256": record["tpm_sha256_after"],
+            "data_sha256": record.get("data_sha256_after")}
         record_operation(profile, "reboot", run=int(run_dir.name), resets=resets)
         save_json(prepared["target"] / "profile.json", profile)
     except Exception as error:
@@ -624,7 +669,8 @@ def stop(root, name):
         profile["boots"] = profile.get("boots", 0) + 1
         profile["state_after_last_boot"] = {
             "smmstore_sha256": record["smmstore_sha256_after"],
-            "tpm_sha256": record["tpm_sha256_after"]}
+            "tpm_sha256": record["tpm_sha256_after"],
+            "data_sha256": record.get("data_sha256_after")}
         record_operation(profile, "stop", run=int(run_dir.name))
         save_json(prepared["target"] / "profile.json", profile)
     except Exception as error:
@@ -703,7 +749,8 @@ def powercut(root, name):
         profile["boots"] = profile.get("boots", 0) + 1
         profile["state_after_last_boot"] = {
             "smmstore_sha256": record["smmstore_sha256_after"],
-            "tpm_sha256": record["tpm_sha256_after"]}
+            "tpm_sha256": record["tpm_sha256_after"],
+            "data_sha256": record.get("data_sha256_after")}
         record_operation(profile, "powercut", run=int(run_dir.name))
         save_json(prepared["target"] / "profile.json", profile)
     except Exception as error:

@@ -37,9 +37,19 @@ SECTOR = 512
 MIB = 1024 * 1024
 ESP_MIB = 512
 FIRMWARE_BYTES = 8 * MIB
-DISK_MIB = 1 + ESP_MIB + rootfs.ROOT_BYTES // MIB + rootfs.HASH_BYTES // MIB + 1
+# Provisional development data-partition sizing (PLAN §4.3 keeps all sizes
+# provisional until retention measurements; 256 MiB holds the 16 MiB LUKS2
+# metadata area plus a dev-sized payload). The partition rides BLANK in the
+# factory image: per-device LUKS2 volumes exist only after explicit
+# provisioning (PLAN Phase 5 item 6) — never a populated shared header.
+DATA_MIB = 256
+DATA_BYTES = DATA_MIB * MIB
+# Linux LUKS partition type GUID (sfdisk "linux-luks").
+LUKS_TYPE_GUID = "ca7d7ccb-63ed-4c53-861c-1742536059cc"
+DISK_MIB = 1 + ESP_MIB + rootfs.ROOT_BYTES // MIB + rootfs.HASH_BYTES // MIB + DATA_MIB + 1
 ROOT_OFFSET = (1 + ESP_MIB) * MIB
 HASH_OFFSET = ROOT_OFFSET + rootfs.ROOT_BYTES
+DATA_OFFSET = HASH_OFFSET + rootfs.HASH_BYTES
 
 # Fixed development partition identities keep the harness reproducible; real
 # device provisioning assigns fresh random identities per installation.
@@ -52,6 +62,8 @@ PARTITIONS = (
     ("FIREARC_HASH_A", 2048 + (ESP_MIB * MIB + rootfs.ROOT_BYTES) // SECTOR,
      rootfs.HASH_BYTES // SECTOR, "0fc63daf-8483-4772-8e79-3d69d8477de4",
      "10000000-0000-4000-8000-0000000000f3"),
+    ("FIREARC_DATA", 2048 + (ESP_MIB * MIB + rootfs.ROOT_BYTES + rootfs.HASH_BYTES) // SECTOR,
+     DATA_BYTES // SECTOR, LUKS_TYPE_GUID, "10000000-0000-4000-8000-0000000000f4"),
 )
 
 KERNEL_CMDLINE = ("root=/dev/mapper/firearc-root rootfstype=ext4 rootflags=ro,noload ro "
@@ -187,6 +199,25 @@ def dev_cpio(authority):
         ("etc/systemd/system/initrd.target.requires/firearc-dev-done.service",
          0o0120777, b"../firearc-dev-done.service"),
     ])
+
+
+def assert_data_blank(disk):
+    """Factory-image rule: the data partition must be empty storage bytes.
+
+    No populated LUKS header, no header template, no leftovers — the
+    per-device volume is created only during explicit provisioning
+    (luks.provision_data), never copied into the factory image.
+    """
+    with open(disk, "rb") as handle:
+        handle.seek(DATA_OFFSET)
+        remaining = DATA_BYTES
+        while remaining:
+            block = handle.read(min(remaining, 8 * MIB))
+            if not block or block.count(0) != len(block):
+                raise SafetyError("FIREARC_DATA region of the factory image is "
+                                  "not blank; a populated shared LUKS header "
+                                  "must never enter the factory image")
+            remaining -= len(block)
 
 
 def sfdisk_script():
@@ -505,12 +536,16 @@ def assemble(root, tools_label, rootfs_label, sign_label, label):
         shutil.move(str(workspace / "device.raw"), str(disk))
         if disk.stat().st_size != DISK_MIB * MIB:
             raise SafetyError("Assembled development disk has unexpected geometry")
+        assert_data_blank(disk)
         manifest = {
             "schema": 1, "disk_bytes": DISK_MIB * MIB, "sector_bytes": SECTOR,
             "disk_guid": DISK_GUID, "deterministic_development_ids": True,
             "partitions": [{"name": name, "start_sector": start, "sectors": size,
                             "type": kind, "uuid": unique} for name, start, size, kind, unique in PARTITIONS],
             "kernel_cmdline": KERNEL_CMDLINE,
+            "data_partition": {"name": "FIREARC_DATA", "size_mib": DATA_MIB,
+                                "offset_bytes": DATA_OFFSET, "blank": True,
+                                "luks": "provisioned per device only (Phase 5 item 6)"},
             "inputs": {"rootfs_label": rootfs_label, "sign_label": sign_label,
                        "uki_sha256": sha256(uki), "loader_sha256": sha256(loader),
                        "signer_fingerprint": sign_result.get("signer_fingerprint"),
@@ -530,6 +565,7 @@ def assemble(root, tools_label, rootfs_label, sign_label, label):
         write_json(work / "device.json", manifest)
         write_json(work / "result.json", {"passed": True, "artifacts": {"device.raw": sha256(disk)},
                                           "device_bytes": DISK_MIB * MIB,
+                                          "data_partition_blank": True,
                                           "boot_chain_qualified": False,
                                           "scope": "Offline development disk assembly with signed "
                                                    "boot artifacts; no boot executed"})

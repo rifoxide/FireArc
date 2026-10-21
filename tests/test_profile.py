@@ -1,20 +1,24 @@
 """Offline tests for the persistent installed-device profile and its invariants."""
 
+import hashlib
 import json
 from pathlib import Path
 import sys
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "tests"))
-from firearc import device, profile
+from firearc import device, luks, profile
 from firearc.integrity import SafetyError, read_json, sha256, write_json
 from support import temporary
 from test_firmware_layout import layout_of, synthetic_image
 
 DEVICE_LABEL = "device-l"
 FIRMWARE_LABEL = "firmware-sign-l"
+TOOLS_LABEL = "tools-l"
+DATA_UUID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 
 
 def fabricate(root):
@@ -27,12 +31,15 @@ def fabricate(root):
     dev.mkdir(mode=0o700)
     output = dev / "output"
     output.mkdir(mode=0o700)
-    (output / "device.raw").write_bytes(b"D" * 8192)
+    # The disk is big enough to carry the (blank) data partition region.
+    disk_size = luks.DATA_OFFSET + luks.DATA_BYTES
+    with (output / "device.raw").open("wb") as handle:
+        handle.write(b"D" * 8192)
+        handle.truncate(disk_size)
     write_json(dev / "result.json",
                {"passed": True, "artifacts": {"device.raw": sha256(output / "device.raw")}})
     write_json(dev / "device.json", {"kernel_cmdline": device.KERNEL_CMDLINE})
     stage = build / "images" / FIRMWARE_LABEL
-    stage.parent.mkdir(mode=0o700, exist_ok=True)
     stage.mkdir(mode=0o700)
     rom_output = stage / "output"
     rom_output.mkdir(mode=0o700)
@@ -43,6 +50,56 @@ def fabricate(root):
                               sha256(rom_output / "signed-firmware.rom")},
                 "signed": {"rom_sha256": sha256(rom_output / "signed-firmware.rom")},
                 "input": {"firmware_label": "fb-l", "rom_sha256": "0" * 64}})
+
+
+def fake_data_provision(root, target, tools_label):
+    """Synthetic per-device LUKS2 evidence without docker/cryptsetup."""
+    target = Path(target)
+    evidence = target / "provision"
+    evidence.mkdir(mode=0o700)
+    secrets = target / "secrets"
+    secrets.mkdir(mode=0o700)
+    credential = b"R" * luks.RECOVERY_BYTES
+    path = secrets / "recovery.key"
+    path.write_bytes(credential)
+    path.chmod(0o600)
+    document = {
+        "schema": 1, "volume": "luks2", "label": luks.LUKS_LABEL,
+        "uuid": DATA_UUID, "keyslots": ["0"],
+        "recovery_credential": {"bits": 256, "path": "secrets/recovery.key",
+                                "sha256": hashlib.sha256(credential).hexdigest(),
+                                "escrow": "pending (Phase 5 item 7)",
+                                "transport": "file only"},
+        "data_region_sha256": luks.region_digest(target / "disk.raw", luks.DATA_OFFSET),
+    }
+    write_json(evidence / "data.json", document)
+    return document
+
+
+def provision(root, name="dev1", *, replace=False):
+    """_provision with the LUKS formatting step stubbed to synthetic evidence."""
+    with patch.object(profile.luks, "provision_data", fake_data_provision):
+        return profile._provision(root, name, DEVICE_LABEL, FIRMWARE_LABEL,
+                                  TOOLS_LABEL, replace=replace)
+
+
+# Shrink the data-partition geometry for this suite only: the real offset
+# (~4.7 GiB) would make every whole-disk digest and profile copy in these
+# offline tests gigabytes large. The geometry contract itself is pinned in
+# tests/test_luks.py against the real constants.
+_PATCHERS = []
+
+
+def setUpModule():
+    _PATCHERS.append(patch.object(luks, "DATA_OFFSET", 1024 * 1024))
+    _PATCHERS.append(patch.object(luks, "DATA_BYTES", 8 * 1024 * 1024))
+    for patcher in _PATCHERS:
+        patcher.start()
+
+
+def tearDownModule():
+    for patcher in _PATCHERS:
+        patcher.stop()
 
 
 class NameTests(unittest.TestCase):
@@ -58,10 +115,12 @@ class ProvisionTests(unittest.TestCase):
     def test_provision_creates_persistent_state(self):
         with temporary() as root:
             fabricate(root)
-            result = profile._provision(root, "dev1", DEVICE_LABEL, FIRMWARE_LABEL)
+            result = provision(root)
             self.assertTrue(result["passed"])
             target = root / "build/devices/dev1"
-            self.assertEqual((target / "disk.raw").read_bytes(), b"D" * 8192)
+            with (target / "disk.raw").open("rb") as disk:
+                self.assertEqual(disk.read(8192), b"D" * 8192)
+                self.assertEqual(disk.seek(0, 2), luks.DATA_OFFSET + luks.DATA_BYTES)
             self.assertEqual((target / "flash.rom").stat().st_size, device.FIRMWARE_BYTES)
             for name in ("tpm", "runs"):
                 self.assertTrue((target / name).is_dir())
@@ -76,11 +135,11 @@ class ProvisionTests(unittest.TestCase):
     def test_provision_never_silently_replaces(self):
         with temporary() as root:
             fabricate(root)
-            profile._provision(root, "dev1", DEVICE_LABEL, FIRMWARE_LABEL)
+            provision(root)
             with self.assertRaises(SafetyError) as raised:
-                profile._provision(root, "dev1", DEVICE_LABEL, FIRMWARE_LABEL)
+                provision(root)
             self.assertIn("explicitly", str(raised.exception))
-            result = profile._provision(root, "dev1", DEVICE_LABEL, FIRMWARE_LABEL, replace=True)
+            result = provision(root, replace=True)
             self.assertTrue(result["passed"])
             self.assertEqual(read_json(root / "build/devices/dev1/profile.json")["boots"], 0)
 
@@ -89,17 +148,21 @@ class ProvisionTests(unittest.TestCase):
             fabricate(root)
             (root / "build/images" / DEVICE_LABEL / "output/device.raw").write_bytes(b"X" * 8192)
             with self.assertRaises(SafetyError):
-                profile._provision(root, "dev1", DEVICE_LABEL, FIRMWARE_LABEL)
+                provision(root)
 
 
 class LoadTests(unittest.TestCase):
     def test_load_validates_profile_contract(self):
         with temporary() as root:
             fabricate(root)
-            profile._provision(root, "dev1", DEVICE_LABEL, FIRMWARE_LABEL)
+            provision(root)
             target, stored = profile.load(root, "dev1")
             self.assertEqual(target.name, "dev1")
-            self.assertEqual(stored["provenance"]["disk_bytes"], 8192)
+            self.assertEqual(stored["provenance"]["disk_bytes"],
+                             luks.DATA_OFFSET + luks.DATA_BYTES)
+            self.assertEqual(stored["data"]["uuid"], DATA_UUID)
+            self.assertEqual(stored["data"]["keyslots"], ["0"])
+            self.assertEqual(stored["operations"][0]["data_volume_uuid"], DATA_UUID)
             with (target / "flash.rom").open("r+b") as flash:
                 flash.truncate(1024)
             with self.assertRaises(SafetyError):
@@ -108,7 +171,7 @@ class LoadTests(unittest.TestCase):
     def test_load_rejects_foreign_harness_cmdline(self):
         with temporary() as root:
             fabricate(root)
-            profile._provision(root, "dev1", DEVICE_LABEL, FIRMWARE_LABEL)
+            provision(root)
             target = root / "build/devices/dev1"
             stored = read_json(target / "profile.json")
             stored["provenance"]["kernel_cmdline"] = "root=/dev/other"
@@ -121,6 +184,61 @@ class LoadTests(unittest.TestCase):
             fabricate(root)
             with self.assertRaises(SafetyError):
                 profile.load(root, "ghost")
+
+    def test_provision_creates_per_device_luks2_evidence(self):
+        with temporary() as root:
+            fabricate(root)
+            provision(root)
+            target = root / "build/devices/dev1"
+            evidence = read_json(target / "provision/data.json")
+            self.assertEqual(evidence["uuid"], DATA_UUID)
+            credential = target / "secrets/recovery.key"
+            self.assertTrue(credential.is_file())
+            import stat
+            self.assertEqual(stat.S_IMODE(credential.stat().st_mode), 0o600)
+            stored = read_json(target / "profile.json")
+            self.assertEqual(stored["data"]["region_sha256"],
+                             evidence["data_region_sha256"])
+            self.assertEqual(stored["data"]["recovery_credential"]["escrow"],
+                             "pending (Phase 5 item 7)")
+
+    def test_load_rejects_data_region_drift(self):
+        with temporary() as root:
+            fabricate(root)
+            provision(root)
+            disk = root / "build/devices/dev1/disk.raw"
+            with disk.open("r+b") as handle:
+                handle.seek(luks.DATA_OFFSET + 4096)
+                handle.write(b"X")
+            with self.assertRaises(SafetyError) as raised:
+                profile.load(root, "dev1")
+            self.assertIn("LUKS2 data volume region", str(raised.exception))
+
+    def test_load_rejects_credential_tampering(self):
+        with temporary() as root:
+            fabricate(root)
+            provision(root)
+            credential = root / "build/devices/dev1/secrets/recovery.key"
+            original = credential.read_bytes()
+            for damage in (lambda: credential.chmod(0o644),
+                           lambda: credential.write_bytes(b"0" * 32)):
+                with self.subTest(damage=damage), self.assertRaises(SafetyError):
+                    damage()
+                    profile.load(root, "dev1")
+                credential.chmod(0o600)
+                credential.write_bytes(original)
+
+    def test_load_rejects_foreign_data_contract(self):
+        with temporary() as root:
+            fabricate(root)
+            provision(root)
+            target = root / "build/devices/dev1"
+            stored = read_json(target / "profile.json")
+            stored["data"]["keyslots"] = ["0", "1"]
+            profile.save_json(target / "profile.json", stored)
+            with self.assertRaises(SafetyError) as raised:
+                profile.load(root, "dev1")
+            self.assertIn("provisioning contract", str(raised.exception))
 
 
 class IdentityTests(unittest.TestCase):
@@ -185,7 +303,7 @@ class RunNumberingTests(unittest.TestCase):
 class SnapshotTests(unittest.TestCase):
     def prepared(self, root):
         fabricate(root)
-        profile._provision(root, "dev1", DEVICE_LABEL, FIRMWARE_LABEL)
+        provision(root)
         target = root / "build/devices/dev1"
         (target / "tpm/tpm2-00.permall").write_bytes(b"tpm-state")
         stored = read_json(target / "profile.json")

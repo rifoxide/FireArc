@@ -90,21 +90,25 @@ class DeviceTests(unittest.TestCase):
         self.assertEqual(script, device.sfdisk_script())
         self.assertTrue(script.startswith("label: gpt\n"))
         rows = [line for line in script.splitlines() if line.startswith("start=")]
-        self.assertEqual(len(rows), 3)
+        self.assertEqual(len(rows), 4)
         self.assertIn('name="FIREARC_ESP", attrs=RequiredPartition', rows[0])
         self.assertIn('name="FIREARC_ROOT_A"', rows[1])
         self.assertIn('name="FIREARC_HASH_A"', rows[2])
+        self.assertIn('name="FIREARC_DATA"', rows[3])
+        self.assertIn(device.LUKS_TYPE_GUID, rows[3])
         parsed = []
         for row in rows:
             fields = dict(re.findall(r"(\w+)=(\"[^\"]+\"|[^,]+)", row))
             parsed.append((fields["start"], fields["size"], fields["name"].strip('"')))
         self.assertEqual([row[0] for row in parsed], ["2048", str(2048 + 512 * 1024**2 // 512),
-                                                      str(2048 + (512 * 1024**2 + 4 * 1024**3) // 512)])
+                                                      str(2048 + (512 * 1024**2 + 4 * 1024**3) // 512),
+                                                      str(2048 + (512 * 1024**2 + 4 * 1024**3 + 128 * 1024**2) // 512)])
         covered = sum(int(row[1]) for row in parsed)
         self.assertEqual(device.DISK_MIB * 1024 * 2, 2048 + covered + 2048)
         self.assertEqual(device.ROOT_OFFSET, (1 + 512) * 1024 * 1024)
         self.assertEqual(device.HASH_OFFSET, device.ROOT_OFFSET + 4 * 1024**3)
-        self.assertEqual(len({row[4] for row in device.PARTITIONS}), 3)
+        self.assertEqual(device.DATA_OFFSET, device.HASH_OFFSET + 128 * 1024**2)
+        self.assertEqual(len({row[4] for row in device.PARTITIONS}), 4)
 
     def test_kernel_cmdline_and_loader_configuration(self):
         self.assertIn("rauc.slot=A", device.KERNEL_CMDLINE)

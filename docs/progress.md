@@ -1,8 +1,8 @@
 # Implementation progress
 
-**Updated:** 2026-10-21. **Stage:** enforced secure boot chain complete on
-the development trust domain; Phase 5 (TPM-bound data) in progress. The
-complete secured appliance is not yet implemented.
+**Updated:** 2026-10-21. **Stage:** Phase 5 (TPM-bound data) in progress —
+signed PCR 11 authorizations and per-device LUKS2 volumes landed; unlock
+and escrow next. The complete secured appliance is not yet implemented.
 
 ## Implemented
 
@@ -257,6 +257,23 @@ complete secured appliance is not yet implemented.
   restage the chain), and section content is measured at PE VirtualSize
   (the combined initrd's trailing cpio padding zeros and `.sbat`'s NUL are
   measured content).
+- **Per-device LUKS2 data volumes** (PLAN Phase 5 item 6 complete;
+  ADR 0010, [validation](validation/data-provisioning.md)): the factory
+  disk gained a blank `FIREARC_DATA` partition (256 MiB provisional),
+  asserted blank by two independent checks; `device-provision` now
+  formats it into a unique LUKS2 volume with the pinned cryptsetup 2.7.5
+  (argon2id, aes-xts-plain64) and a 256-bit recovery credential as the
+  sole keyslot. The credential is file-handle-only (never argv, serial
+  or evidence — re-checked on the real profiles), kept 0600 under the
+  profile's `secrets/`, and marked escrow-pending (item 7). The stage
+  verifies the credential unlocks (`--test-passphrase`), parses the
+  spliced on-disk header both from `luksDump` and from the disk bytes
+  (magic/u64 hdr_size/JSON at 0x1000, validated against real cryptsetup
+  output), and refuses blank-to-blank formats. Uniqueness proven on real
+  provisions (dev7/dev8: distinct uuid, salts, region digests,
+  credentials from byte-identical factory images); the sealed region is
+  now device identity — asserted per boot session, drift refused at
+  `load`. Both enforcing gates re-passed on the 4-partition geometry.
 - Operations note (recorded after investigating): external `docker image
   prune` deleted the digest-pinned tagless tools and SDK images; the harness
   now treats a cached tools stage whose image is absent from docker as stale
@@ -266,7 +283,7 @@ complete secured appliance is not yet implemented.
 
 ## Validation
 
-The label-free bootstrap/build/verification pipeline and 218 offline tests pass.
+The label-free bootstrap/build/verification pipeline and 237 offline tests pass.
 The fresh-clone build/verification passed, and `just reproduce --yes` completed
 two empty-cache download/build/verification rounds with **byte-identical
 payloads** (kernel, initramfs, root tar, ext4, verity tree, authority). The
@@ -283,9 +300,10 @@ byte-reproducibility result is implied by the implementation list above.
 
 ## Next gates
 
-1. Phase 5 items 6–15: per-device LUKS2 volumes, escrow,
-   `systemd-cryptenroll` with PCR 7 binding plus the signed PCR 11 policy
-   (item 5's `enter-initrd` authorizations are in the UKI now),
+1. Phase 5 items 7–15: escrow of the recovery credential (owner decision
+   pending on the secret-handling path), `systemd-cryptenroll` with PCR 7
+   binding plus the signed PCR 11 policy (item 5's `enter-initrd`
+   authorizations and item 6's per-device volumes are in place),
    crypttab/unlock ordering, and the move/refusal test matrix.
 2. Phase 6+ (RAUC updates, health/rollback, attestation, recovery, release
    hardening/CI) per PLAN §1.2 after the data-unlock chain lands.

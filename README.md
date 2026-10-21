@@ -73,7 +73,8 @@ Useful commands: `just status`, `just build-tools`, `just build-root`,
 `just firmware-sources --online`, `just firmware-build`, `just firmware-layout`,
 `just uki`, `just pcr-keys`, `just pcr-sign`, `just sign`, `just enroll`,
 `just device`, `just check-boot`,
-`just device-provision`, `just device-boot`,
+`just device-provision` (also formats the per-device LUKS2 data volume
+and its recovery credential), `just device-boot`,
 `just device-reboot`, `just device-stop`, `just device-powercut`,
 `just device-snapshot`, `just device-restore`, `just prune`.
 
