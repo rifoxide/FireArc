@@ -81,7 +81,10 @@ class PipelineTests(unittest.TestCase):
     def setUp(self):
         self.patches = [patch.object(pipeline, "validate_locks"), patch.object(pipeline.builder, "lock"),
                         patch.object(pipeline.builder, "root_lock"), patch.object(pipeline.builder, "verify_tools"),
-                        patch.object(pipeline.subprocess, "run")]
+                        # Docker probes in verify_record see rc=0 (image present):
+                        # cached stages must stay cached in these tests.
+                        patch.object(pipeline.subprocess, "run",
+                                     **{"return_value.returncode": 0})]
         for item in self.patches: item.start()
         self.addCleanup(lambda: [item.stop() for item in reversed(self.patches)])
 

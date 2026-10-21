@@ -434,6 +434,16 @@ def boot(root, name, *, count=2, tcg=False):
                     session_ran = True
                     machine.session.wait_until(lambda text: device.REQUIRED_MARKER in text
                                                or device.DENIAL_MARKER.search(text))
+                    if prepared.get("tpm_dir") is not None:
+                        # The Phase 5 investigation dump (securityfs event log
+                        # via od) trails the boot marker; let it finish before
+                        # quitting. Diagnostic only — an incomplete dump is
+                        # recorded by the missing end marker, never fatal.
+                        try:
+                            machine.session.wait_until(
+                                lambda text: "FIREARC_PCR_DUMP_END" in text)
+                        except SafetyError:
+                            pass
                     machine.session.quit()
                     text = serial.read_text(errors="replace")
             except Exception as error:

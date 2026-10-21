@@ -201,8 +201,15 @@ class Pipeline:
             verify_file(regular_file(self.root, name), digest)
         if record["stage"] == "tools":
             builder.verify_tools(self.root, record["id"])
-            subprocess.run(["docker", "image", "inspect", value["image_id"]], check=True,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            probe = subprocess.run(["docker", "image", "inspect", value["image_id"]],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if probe.returncode != 0:
+                # A pinned image absent from docker (for example after external
+                # image cleanup) is stale, not tampered: rebuild it from the
+                # pinned inputs. File-level verification above still fails
+                # closed on actual evidence tampering.
+                raise FileNotFoundError(
+                    f"Pinned tools image {value['image_id']} is not loaded in docker")
 
     STAGE_INPUTS = {
         # Stages whose sources are wider than their lock file still use the

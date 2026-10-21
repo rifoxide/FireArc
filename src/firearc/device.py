@@ -105,14 +105,18 @@ StandardError=journal+console
 # TPM 2.0 device through ACPI (QEMU's tpm-tis presents the MSFT0101 device; the
 # chip lands at /sys/class/tpm/tpm0 with tpm_version_major=2 and /dev/tpm0);
 # without a TPM attached the profile boot gate expects the explicit miss line.
-# The debug lines are dev-harness diagnostics only. Blocking initrd.target
+# The debug lines are dev-harness diagnostics only. The PCR dump (Phase 5
+# investigation) prints the kernel's sysfs view of every active bank after the
+# boot marker, bracketed by FIREARC_PCR_DUMP markers; PCRs reset at each TPM
+# startup, so the dump shows exactly what this boot's firmware and EFI stub
+# measured — cat only, no userspace TPM stack in the minimal initramfs. Blocking initrd.target
 # (Before= plus the requires symlink) keeps the machine in the initrd for the
 # runtime verity read: after a bounded settle window the unit drops caches and
 # re-reads the whole verity-mapped root, reporting an I/O error (corruption
 # caught after mapping) or a clean read. It then idles; the harness, not the
 # guest, ends every session. The read uses cat (coreutils): dd is not part
 # of the minimal dracut initramfs, and the shell captures cat's stderr only.
-ExecStart=/bin/sh -c 'echo FIREARC_TPM_DEBUG_CLASS=$(ls /sys/class 2>/dev/null | grep -i tpm); echo FIREARC_TPM_DEBUG_TPM0=$(ls /sys/class/tpm/tpm0 2>&1); echo FIREARC_TPM_DEBUG_VERSION=$(cat /sys/class/tpm/tpm0/tpm_version_major 2>&1); echo FIREARC_TPM_DEBUG_DEV=$(ls /dev/tpm0 /dev/tpmrm0 2>&1); if [ -c /dev/tpm0 ] && [ -d /sys/class/tpm/tpm0 ] && [ "$(cat /sys/class/tpm/tpm0/tpm_version_major 2>/dev/null)" = "2" ]; then echo FIREARC_TPM_TIS_OK > /dev/console; else echo FIREARC_TPM_TIS_MISSING > /dev/console; fi; if grep -Eq " /sysroot ext4 ro(,| )" /proc/mounts; then echo FIREARC_DEV_BOOT_OK > /dev/console; echo FIREARC_DEV_BOOT_OK > /dev/console; else echo FIREARC_DEV_BOOT_MISSING > /dev/console; fi; sleep 6; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null; rterr=$(cat /dev/mapper/firearc-root 2>&1 > /dev/null); case "$rterr" in *"Input/output error"*) echo FIREARC_RUNTIME_CORRUPT_EIO > /dev/console;; *) echo FIREARC_RUNTIME_READ_CLEAN > /dev/console;; esac; sleep 600'
+ExecStart=/bin/sh -c 'echo FIREARC_TPM_DEBUG_CLASS=$(ls /sys/class 2>/dev/null | grep -i tpm); echo FIREARC_TPM_DEBUG_TPM0=$(ls /sys/class/tpm/tpm0 2>&1); echo FIREARC_TPM_DEBUG_VERSION=$(cat /sys/class/tpm/tpm0/tpm_version_major 2>&1); echo FIREARC_TPM_DEBUG_DEV=$(ls /dev/tpm0 /dev/tpmrm0 2>&1); if [ -c /dev/tpm0 ] && [ -d /sys/class/tpm/tpm0 ] && [ "$(cat /sys/class/tpm/tpm0/tpm_version_major 2>/dev/null)" = "2" ]; then echo FIREARC_TPM_TIS_OK > /dev/console; else echo FIREARC_TPM_TIS_MISSING > /dev/console; fi; if grep -Eq " /sysroot ext4 ro(,| )" /proc/mounts; then echo FIREARC_DEV_BOOT_OK > /dev/console; echo FIREARC_DEV_BOOT_OK > /dev/console; else echo FIREARC_DEV_BOOT_MISSING > /dev/console; fi; echo FIREARC_PCR_DUMP_BEGIN > /dev/console; mkdir -p /sys/kernel/security; mount -t securityfs securityfs /sys/kernel/security 2>/dev/null; od -An -v -tx1 /sys/kernel/security/tpm0/binary_bios_measurements > /dev/ttyS0; echo FIREARC_PCR_DUMP_END > /dev/console; sleep 6; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null; rterr=$(cat /dev/mapper/firearc-root 2>&1 > /dev/null); case "$rterr" in *"Input/output error"*) echo FIREARC_RUNTIME_CORRUPT_EIO > /dev/console;; *) echo FIREARC_RUNTIME_READ_CLEAN > /dev/console;; esac; sleep 600'
 """
 
 LOADER_CONF = "timeout 0\ndefault firearc-a\neditor no\n"
