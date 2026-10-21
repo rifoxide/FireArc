@@ -162,38 +162,30 @@ class DeviceTests(unittest.TestCase):
         with self.assertRaises(SafetyError):
             device.boot_verdict("x" * (8 * 1024 * 1024 + 1))
 
-    def test_firmware_rom_requires_a_consistent_firmware_stage(self):
+    def test_firmware_rom_requires_a_consistent_sign_stage(self):
         with temporary() as root:
-            source = root / "build/firmware-build/fw-x"
+            source = root / "build/images/fws-x"
             output = source / "output"
             output.mkdir(parents=True)
-            rom = output / "coreboot.rom"
+            rom = output / "signed-firmware.rom"
             rom.write_bytes(b"F" * device.FIRMWARE_BYTES)
             digest = sha256(rom)
-            write_json(output / "manifest.json", {"coreboot.rom": {"sha256": digest,
-                                                                  "bytes": device.FIRMWARE_BYTES}})
+            good = {"passed": True, "changed_regions": ["GBB", "VBLOCK_A"],
+                    "artifacts": {"signed-firmware.rom": digest},
+                    "signed": {"rom_sha256": digest},
+                    "input": {"firmware_label": "fb-x", "rom_sha256": "0" * 64}}
             with patch.object(device, "_stage_outputs") as outputs:
-                outputs.return_value = (source, output, {"passed": True,
-                                                         "artifacts": {"coreboot.rom": digest,
-                                                                       "manifest.json": "0" * 64}})
-                resolved, path, manifest = device.firmware_rom(root, "fw-x")
+                outputs.return_value = (source, output, good)
+                resolved, path, manifest = device.firmware_rom(root, "fws-x")
                 self.assertEqual(path, rom)
-                self.assertEqual(manifest["coreboot.rom"]["sha256"], digest)
-            for artifacts in ({"coreboot.rom": "0" * 64, "manifest.json": "0" * 64},):
+                self.assertEqual(manifest["signed"]["rom_sha256"], digest)
+            for broken in ({"passed": True, "changed_regions": ["VBLOCK_A"],
+                            "artifacts": good["artifacts"],
+                            "signed": {"rom_sha256": digest}},       # no GBB root installed
+                           {**good, "signed": {"rom_sha256": "0" * 64}},  # digest mismatch
+                           {**good, "passed": False}):                    # failed stage
                 with patch.object(device, "_stage_outputs") as outputs:
-                    outputs.return_value = (source, output, {"passed": True, "artifacts": artifacts})
+                    outputs.return_value = (source, output, broken)
                     with self.assertRaises(SafetyError):
-                        device.firmware_rom(root, "fw-x")
-            # A manifest describing a different image than the artifact fails.
-            with patch.object(device, "_stage_outputs") as outputs:
-                outputs.return_value = (source, output, {"passed": True,
-                                                         "artifacts": {"coreboot.rom": digest,
-                                                                       "manifest.json": "0" * 64}})
-                with patch.object(device, "read_json", return_value={"coreboot.rom": {
-                        "sha256": "0" * 64, "bytes": device.FIRMWARE_BYTES}}):
-                    with self.assertRaises(SafetyError):
-                        device.firmware_rom(root, "fw-x")
+                        device.firmware_rom(root, "fws-x")
 
-
-if __name__ == "__main__":
-    unittest.main()

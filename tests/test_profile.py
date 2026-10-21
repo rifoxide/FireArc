@@ -14,7 +14,7 @@ from support import temporary
 from test_firmware_layout import layout_of, synthetic_image
 
 DEVICE_LABEL = "device-l"
-FIRMWARE_LABEL = "firmware-build-l"
+FIRMWARE_LABEL = "firmware-sign-l"
 
 
 def fabricate(root):
@@ -31,19 +31,18 @@ def fabricate(root):
     write_json(dev / "result.json",
                {"passed": True, "artifacts": {"device.raw": sha256(output / "device.raw")}})
     write_json(dev / "device.json", {"kernel_cmdline": device.KERNEL_CMDLINE})
-    firmware = build / "firmware-build"
-    firmware.mkdir(mode=0o700)
-    stage = firmware / FIRMWARE_LABEL
+    stage = build / "images" / FIRMWARE_LABEL
+    stage.parent.mkdir(mode=0o700, exist_ok=True)
     stage.mkdir(mode=0o700)
     rom_output = stage / "output"
     rom_output.mkdir(mode=0o700)
-    (rom_output / "coreboot.rom").write_bytes(b"F" * device.FIRMWARE_BYTES)
-    write_json(rom_output / "manifest.json",
-               {"coreboot.rom": {"sha256": sha256(rom_output / "coreboot.rom"),
-                                 "bytes": device.FIRMWARE_BYTES}})
+    (rom_output / "signed-firmware.rom").write_bytes(b"F" * device.FIRMWARE_BYTES)
     write_json(stage / "result.json",
-               {"passed": True, "artifacts": {"coreboot.rom": sha256(rom_output / "coreboot.rom"),
-                                              "manifest.json": sha256(rom_output / "manifest.json")}})
+               {"passed": True, "changed_regions": ["GBB", "VBLOCK_A"],
+                "artifacts": {"signed-firmware.rom":
+                              sha256(rom_output / "signed-firmware.rom")},
+                "signed": {"rom_sha256": sha256(rom_output / "signed-firmware.rom")},
+                "input": {"firmware_label": "fb-l", "rom_sha256": "0" * 64}})
 
 
 class NameTests(unittest.TestCase):

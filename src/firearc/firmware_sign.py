@@ -103,6 +103,7 @@ def build(root, tools_label, firmware_label, futility_label, label):
     shutil.copyfile(work / "unsigned.rom", output / "signed-firmware.rom")
     manifest = read_json(regular_file(keys, "manifest.json"))
     result = {"schema": 1, "passed": True,
+              "artifacts": {"signed-firmware.rom": sha256(output / "signed-firmware.rom")},
               "input": {"rom_sha256": sha256(rom_path), "firmware_label": firmware_label},
               "signed": {"rom_sha256": sha256(output / "signed-firmware.rom")},
               "changed_regions": changed,

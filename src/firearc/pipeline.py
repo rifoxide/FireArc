@@ -30,8 +30,8 @@ DEPENDENCIES = {
     "firmware-layout": ("firmware-build",),
     "uki": ("tools", "root", "rootfs"),
     "sign": ("tools", "root", "uki"),
-    "enroll": ("firmware-build", "sign"),
-    "device": ("tools", "rootfs", "sign"), "check-boot": ("tools", "device", "firmware-build"),
+    "enroll": ("firmware-sign", "sign"),
+    "device": ("tools", "rootfs", "sign"), "check-boot": ("tools", "device", "firmware-sign"),
     "check-secure-boot": ("tools", "uki", "sign", "device", "enroll"),
     "check-firmware-vboot": ("tools", "firmware-sign", "device"),
 }
@@ -329,7 +329,7 @@ class Pipeline:
             sign.build(root, deps["tools"]["id"], deps["root"]["id"], deps["uki"]["id"], build_id)
             return self.build / "images" / build_id, {}
         if stage == "enroll":
-            enroll.build(root, deps["firmware-build"]["id"], deps["sign"]["id"], build_id)
+            enroll.build(root, deps["firmware-sign"]["id"], deps["sign"]["id"], build_id)
             return self.build / "images" / build_id, {}
         if stage == "device":
             device.assemble(root, deps["tools"]["id"], deps["rootfs"]["id"],
@@ -347,7 +347,7 @@ class Pipeline:
             return self.build / "images" / build_id, {}
         if stage == "check-boot":
             device.check_boot(root, deps["tools"]["id"], deps["device"]["id"],
-                              deps["firmware-build"]["id"], build_id)
+                              deps["firmware-sign"]["id"], build_id)
             return self.build / "images" / build_id, {}
         if stage == "metadata":
             target = builder.metadata_path(root)

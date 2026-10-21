@@ -133,7 +133,16 @@ Critical path, in order:
    host-anchored (ADR 0005).
 5. **Requalify on the enforcing image**: layout classification, SMMSTORE
    write confinement, the three-discipline check-boot gate and device-profile
-   identity continuity.
+   identity continuity. **Done 2026-10-21** (ADR 0008): the layout classifier
+   handles the nested vboot map (schema 2; permitted writable set SMMSTORE +
+   RW_NVRAM); `enroll` now targets the **vboot-signed** ROM (the enforcing
+   image carries our GBB root and the Secure Boot varstore) and
+   `check-secure-boot` passes on it — the full chain from vboot-verified RW
+   through digest-anchored Secure Boot to the dm-verity root; `check-boot`
+   requalified on the signed firmware (three disciplines, writes confined);
+   a fresh device profile (`dev4`) provisions from `firmware-sign` and
+   cold-boots twice with flash/TPM identity continuity. Older profiles
+   (dev1–dev3) still pin the pre-vboot firmware as protected state.
 
 **Exit criteria for the current goal:** gate G2 passes and the
 chain-enforcement core of gate G4 passes — nothing unsigned executes from

@@ -224,7 +224,9 @@ class ContentTests(unittest.TestCase):
             self.assertRaises(SafetyError, enroll.variables, root)
 
     def test_stage_wiring(self):
-        self.assertEqual(pipeline.DEPENDENCIES["enroll"], ("firmware-build", "sign"))
+        self.assertEqual(pipeline.DEPENDENCIES["enroll"], ("firmware-sign", "sign"))
+        # Enrollment targets the vboot-signed ROM: the enforcing image must
+        # carry our GBB root, not the build's trivially-verifying devkeys.
         inputs = pipeline.Pipeline.STAGE_INPUTS["enroll"]
         for name in ("secrets/manifest.json", "secrets/pk.esl", "secrets/kek.esl",
                      "secrets/db.esl", "secrets/pk.auth", "secrets/kek.auth",

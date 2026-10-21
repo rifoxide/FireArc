@@ -276,8 +276,20 @@ def variables(root):
 
 
 def build(root, firmware_label, sign_label, label):
-    """Produce the enrolled firmware image from the verified pristine ROM."""
-    _, rom, _ = firmware_layout.verified_rom(root, firmware_label)
+    """Produce the enrolled firmware image from the vboot-signed ROM.
+
+    `firmware_label` is the firmware-sign stage: the RW section is vboot-
+    verified under our GBB root (the stock unsigned build's devkey root
+    verifies trivially), and enrollment adds the Secure Boot variable store
+    into the SMMSTORE region that vboot verification does not cover.
+    """
+    source = private_directory(Path(root) / "build/images" / firmware_label)
+    result = read_json(regular_file(source, "result.json"))
+    if not result.get("passed") or "GBB" not in result.get("changed_regions", []):
+        raise SafetyError("Expected a successful firmware-sign stage with an installed GBB root")
+    rom = regular_file(source / "output", "signed-firmware.rom")
+    if result["signed"]["rom_sha256"] != sha256(rom):
+        raise SafetyError("Signed-firmware manifest does not match the ROM artifact")
     _, sign_output, sign_result = device._stage_outputs(root, sign_label, "sign")
     if not sign_result.get("signed") or not sign_result.get("signatures_verified"):
         raise SafetyError("Expected verified signatures to anchor in db")

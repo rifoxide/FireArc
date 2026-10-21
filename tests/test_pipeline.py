@@ -91,8 +91,11 @@ class PipelineTests(unittest.TestCase):
         (root / "src/firearc/example.py").write_text("initial")
         for name in ["debian-build", "root"]:
             (root / f"locks/{name}.json").write_text('{"schema":1}')
-        for name in pipeline.Pipeline.STAGE_INPUTS["firmware-build"]:
+        for name in (pipeline.Pipeline.STAGE_INPUTS["firmware-build"]
+                     + pipeline.Pipeline.STAGE_INPUTS["futility"]
+                     + pipeline.Pipeline.STAGE_INPUTS["firmware-sign"]):
             (root / name).parent.mkdir(parents=True, exist_ok=True)
+            (root / name).write_text("stage-input fixture\n")
             (root / name).write_text("firmware input fixture")
         # The signing stage's custody-manifest input (digest-only input).
         for name in pipeline.Pipeline.STAGE_INPUTS["sign"]:
@@ -118,7 +121,8 @@ class PipelineTests(unittest.TestCase):
             record = first.ensure("check-boot")
             self.assertEqual(first.calls, ["metadata", "packages-tools", "tools", "packages-root",
                                             "root", "rootfs", "uki", "sign", "device",
-                                            "firmware-sources", "firmware-build", "check-boot"])
+                                            "firmware-sources", "firmware-build", "futility",
+                                            "firmware-sign", "check-boot"])
             self.assertIn("check-boot-", record["id"])
             second = FakePipeline(root)
             self.assertEqual(second.ensure("check-boot"), record)

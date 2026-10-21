@@ -199,6 +199,17 @@ qualification. The complete secured appliance is not yet implemented.
   than halting — the no-recovery-payload session provides the dead-machine
   form. Hardware/ODM transfer notes started at
   `docs/hardware-odm-notes.md`.
+- **Step-5 requalification on the enforcing image complete** (ADR 0008):
+  `enroll` now consumes the firmware-sign output, so the enforcing image
+  carries the vboot-verified RW (our GBB root) *and* the enrolled Secure Boot
+  varstore — `check-secure-boot` passes end to end (vboot RW → digest-anchored
+  Secure Boot → signed UKI → dm-verity root); `check-boot` requalified on the
+  signed firmware (three disciplines, write confinement); device profiles
+  provision from `firmware-sign` now — `dev4` cold-boots twice with flash/TPM
+  identity continuity on the vboot image. The check-firmware-vboot gate
+  (added with step 4) covers the firmware-layer proofs. The current goal's
+  exit criteria (G2 + enforcement core of G4) are met on the development
+  trust domain; remaining G4 scope (physical, custody, release) stays open.
 - Bounded evidence retention tightened (`just prune`): keeps only the
   state-referenced current generation plus device-profile-pinned
   provenance (was current + previous), build ids no longer truncate

@@ -111,7 +111,9 @@ def provision(root, name, *, replace=False):
     validate_name(name)
     pipe = pipeline.Pipeline(root, online=False)
     device_label = pipe.ensure("device")["id"]
-    firmware_label = pipe.ensure("firmware-build")["id"]
+    # The profile's firmware is the vboot-signed image (our GBB root): the
+    # machine's flash carries verified RW sections from cold start.
+    firmware_label = pipe.ensure("firmware-sign")["id"]
     return _provision(root, name, device_label, firmware_label, replace=replace)
 
 

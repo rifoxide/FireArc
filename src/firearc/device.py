@@ -400,16 +400,20 @@ def boot_verdict(serial_text):
 
 
 def firmware_rom(root, label):
-    """The verified self-built firmware ROM from a firmware-build stage."""
+    """The verified vboot-signed firmware ROM from a firmware-sign stage.
+
+    Since chain step 5 every boot gate runs on the vboot-signed image: the
+    RW section is verified under our GBB root (ADR 0008), which is the
+    firmware every later enforcement layer builds upon.
+    """
     source, output, result = _stage_outputs(
-        root, label, "firmware-build", Path(root) / "build/firmware-build")
-    rom = regular_file(output, "coreboot.rom")
-    if result.get("artifacts", {}).get("coreboot.rom") != sha256(rom):
-        raise SafetyError("Firmware stage does not vouch for the ROM artifact")
-    manifest = read_json(regular_file(output, "manifest.json"))
-    if manifest.get("coreboot.rom", {}).get("sha256") != sha256(rom) \
-            or manifest.get("coreboot.rom", {}).get("bytes") != FIRMWARE_BYTES:
-        raise SafetyError("Firmware manifest does not match the ROM artifact")
+        root, label, "firmware-sign", Path(root) / "build/images")
+    rom = regular_file(output, "signed-firmware.rom")
+    if not result.get("passed") or "GBB" not in result.get("changed_regions", []):
+        raise SafetyError("Expected a successful firmware-sign stage with an installed GBB root")
+    if result.get("signed", {}).get("rom_sha256") != sha256(rom):
+        raise SafetyError("Firmware-sign stage does not vouch for the ROM artifact")
+    manifest = result
     return source, rom, manifest
 
 
@@ -630,8 +634,8 @@ def check_boot(root, tools_label, device_label, firmware_label, label):
             "positive_boot": runs["good"], "corruption_control": runs["corrupt"],
             "runtime_corruption_control": runs["runtime-corrupt"],
             "firmware": {"rom_sha256": sha256(rom),
-                         "sdk_image": firmware_manifest.get("sdk_image"),
-                         "sources": len(firmware_manifest.get("sources", {})),
+                         "sign_stage": firmware_manifest.get("input", {}).get("firmware_label"),
+                         "unsigned_rom_sha256": firmware_manifest.get("input", {}).get("rom_sha256"),
                          "evidence": firmware_source.name},
             "qemu_sha256": pins["sha256"],
             "flash_write_confinement": {
@@ -640,9 +644,11 @@ def check_boot(root, tools_label, device_label, firmware_label, label):
                 "scope": "Observed write destinations only; QEMU pflash has no "
                          "hardware write protection"},
             "qemu_boot_verified": True, "boot_chain_qualified": False,
-            "scope": "QEMU Q35 development harness; unsigned dev profile on the self-built "
-                     "coreboot/EDK II firmware, not Secure Boot, physical-device or "
-                     "production qualification"})
+            "scope": "QEMU Q35 development harness; dev profile on the self-built "
+                     "vboot-signed coreboot/EDK II firmware (RW verified under our "
+                     "GBB root, ADR 0008) without Secure Boot enrollment — the "
+                     "enforcing chain is check-secure-boot's scope; not "
+                     "physical-device or production qualification"})
     except Exception as error:
         write_json(work / "result.json", {"passed": False, "error": str(error),
                                           "boot_chain_qualified": False})
