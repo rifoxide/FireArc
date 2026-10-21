@@ -70,7 +70,7 @@ class FakePipeline(pipeline.Pipeline):
         else:
             output = work / "output"
             output.mkdir()
-            names = ["firearc-root.tar", "firearc-root.vmlinuz", "firearc-initrd.img"] if stage == "root" else ["root.ext4", "root.verity", "verity-authority.json"] if stage == "rootfs" else [device.UKI_ARTIFACT] if stage == "uki" else ([device.UKI_ARTIFACT, "systemd-bootx64.efi"] if stage == "sign" else [])
+            names = ["firearc-root.tar", "firearc-root.vmlinuz", "firearc-initrd.img"] if stage == "root" else ["root.ext4", "root.verity", "verity-authority.json"] if stage == "rootfs" else [device.UKI_ARTIFACT] if stage in ("uki", "pcr-sign") else ([device.UKI_ARTIFACT, "systemd-bootx64.efi"] if stage == "sign" else [])
             for name in names:
                 (output / name).write_text(name)
             write_json(work / "result.json", {"passed": True, "artifacts": {name: sha256(output / name) for name in names}, "root_payload": "root.ext4"})
@@ -105,6 +105,11 @@ class PipelineTests(unittest.TestCase):
             if not (root / name).exists():
                 (root / name).parent.mkdir(parents=True, exist_ok=True)
                 (root / name).write_text("custody fixture")
+        # The PCR-policy stage's key material (digest-only inputs).
+        for name in pipeline.Pipeline.STAGE_INPUTS["pcr-sign"]:
+            if not (root / name).exists():
+                (root / name).parent.mkdir(parents=True, exist_ok=True)
+                (root / name).write_text("pcr fixture")
 
     def test_automatic_dependencies_and_cached_success_need_no_labels(self):
         with temporary() as root:
@@ -123,7 +128,7 @@ class PipelineTests(unittest.TestCase):
             first = FakePipeline(root, online=True)
             record = first.ensure("check-boot")
             self.assertEqual(first.calls, ["metadata", "packages-tools", "tools", "packages-root",
-                                            "root", "rootfs", "uki", "sign", "device",
+                                            "root", "rootfs", "uki", "pcr-sign", "sign", "device",
                                             "firmware-sources", "firmware-build", "futility",
                                             "firmware-sign", "check-boot"])
             self.assertIn("check-boot-", record["id"])
@@ -169,7 +174,7 @@ class PipelineTests(unittest.TestCase):
             self.workspace(root)
             build = FakePipeline(root, online=True)
             outputs = build.publish()
-            self.assertEqual(set(outputs), {"kernel.efi", "initrd.img", "root.tar", "root.ext4", "root.verity", "verity-authority.json", "uki-a.efi", "uki-a-signed.efi", "sbom.json"})
+            self.assertEqual(set(outputs), {"kernel.efi", "initrd.img", "root.tar", "root.ext4", "root.verity", "verity-authority.json", "uki-a.efi", "uki-a-pcr.efi", "uki-a-signed.efi", "sbom.json"})
             self.assertTrue((root / "build/output/root.ext4").is_symlink())
             (root / "build/output/root.ext4").unlink()
             (root / "build/output/root.ext4").write_text("keep")

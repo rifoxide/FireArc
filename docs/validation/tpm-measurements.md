@@ -120,9 +120,11 @@ internet hearsay):
   (`/usr/lib/systemd/systemd-measure`) and `systemd-cryptenroll` +
   `systemd-cryptsetup` in `systemd-cryptsetup=257.13-1~deb13u1` — both
   already pinned in `locks/root.json`; no new packages are needed for
-  signing or enrollment. ukify is *not* in the pinned set (our UKI
-  assembly is its own stage; the sign stage will call systemd-measure
-  directly).
+  signing or enrollment. ukify is *not* in the pinned root set (our UKI
+  assembly is its own stage); item 5 shipped as the `pcr-sign` stage, where
+  the tools image's ukify drives that same pinned systemd-measure for
+  signing and the stage cross-checks its independent `calculate` — see
+  [PCR authorizations](pcr-authorizations.md) and ADR 0009.
 - The PCR 11 measurement algorithm was verified empirically against the
   observed log: each UKI section is measured at its PE `VirtualSize`
   (byte-exact match for `.linux` and `.osrel` digests; `SizeOfRawData`
@@ -140,13 +142,18 @@ internet hearsay):
   measurement it signs), so adding signatures does not shift PCR 11 —
   consistent with the observed identical replay of signed vs unsigned
   UKIs.
-- **Gap: no phase markers.** `systemd-pcrphase*` services (pinned,
-  present in the systemd package) extend PCR 11 with boot-milestone
-  strings, but our initrd does not run them — the observed PCR 11 ends
-  after the section measurements. The "exact data-unlock phase" binding
-  of PLAN item 5 therefore needs the pcrphase units enabled in the initrd
-  (or an equivalent explicit milestone measurement) as part of the
-  LUKS2 work.
+- **Correction (found while implementing item 5): the phase marker DOES
+  run.** `systemd-pcrphase*` services are pinned and present, and the
+  initrd is systemd-based dracut: dev5's own serial shows
+  systemd-pcrphase-initrd.service finishing at t≈1.2 s, before the verity
+  markers. The earlier reading — "our initrd does not run them; the
+  observed PCR 11 ends after the section measurements" — mistook the
+  event log for the PCR state: the phase extend goes through
+  `/dev/tpmrm0`, which bypasses the firmware TCG2 log, so log replay
+  alone under-reports the TPM. This is why item 5's authorization is
+  sections + `enter-initrd` and why the boot-time proof applies the phase
+  extend on the host before comparing ([PCR
+  authorizations](pcr-authorizations.md)).
 - Key separation: the PCR-policy signer (the key whose public half rides
   in `.pcrpkey` and authorizes expected PCR values) must be a distinct
   role from the db/UKI signer per PLAN item 5 — a new gitignored keyset

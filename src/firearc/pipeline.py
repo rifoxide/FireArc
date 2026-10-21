@@ -14,7 +14,7 @@ import sys
 import tarfile
 import uuid
 
-from . import builder, device, enroll, firmware, firmware_build, firmware_layout, initrd, rootfs, sbom, secureboot, sign, uki
+from . import builder, device, enroll, firmware, firmware_build, firmware_layout, initrd, pcr_sign, rootfs, sbom, secureboot, sign, uki
 from .inputs import validate_locks
 from .integrity import SafetyError, private_directory, read_json, regular_file, sha256, verify_file, write_json
 
@@ -29,10 +29,11 @@ DEPENDENCIES = {
     "firmware-sign": ("tools", "firmware-build", "futility"),
     "firmware-layout": ("firmware-build",),
     "uki": ("tools", "root", "rootfs"),
-    "sign": ("tools", "root", "uki"),
+    "pcr-sign": ("tools", "uki"),
+    "sign": ("tools", "root", "pcr-sign"),
     "enroll": ("firmware-sign", "sign"),
     "device": ("tools", "rootfs", "sign"), "check-boot": ("tools", "device", "firmware-sign"),
-    "check-secure-boot": ("tools", "uki", "sign", "device", "enroll"),
+    "check-secure-boot": ("tools", "pcr-sign", "sign", "device", "enroll"),
     "check-firmware-vboot": ("tools", "firmware-sign", "device"),
 }
 
@@ -230,8 +231,11 @@ class Pipeline:
         "firmware-layout": ["src/firearc/firmware_layout.py"],
         # The signing step and enrollment consume generated custody artifacts.
         # Their stage inputs are the exact files read, so regenerating the
-        # hierarchy (or editing any payload) restages both.
+        # hierarchy (or editing any payload) restages both. The PCR-policy
+        # stage signs with its own isolated role under secrets/pcr/.
         "sign": ["secrets/manifest.json", "src/firearc/sign.py"],
+        "pcr-sign": ["secrets/pcr/manifest.json", "secrets/pcr/pcr.key",
+                     "secrets/pcr/pcr.pub", "src/firearc/pcr_sign.py"],
         "enroll": ["secrets/manifest.json", "secrets/pk.esl", "secrets/kek.esl",
                    "secrets/db.esl", "secrets/pk.auth", "secrets/kek.auth",
                    "secrets/db.auth", "src/firearc/enroll.py"],
@@ -242,6 +246,8 @@ class Pipeline:
             return self.memo[stage]
         if stage in ("sign", "enroll") and not (self.root / "secrets/manifest.json").is_file():
             raise SafetyError("Development signing hierarchy absent; run just keys first")
+        if stage in ("pcr-sign", "sign") and not (self.root / "secrets/pcr/manifest.json").is_file():
+            raise SafetyError("Development PCR-policy key absent; run just pcr-keys first")
         dependencies = {name: self.ensure(name) for name in DEPENDENCIES[stage]}
         if stage == "metadata" or stage == "packages-tools":
             source = sha256(self.root / "locks/debian-build.json")
@@ -332,8 +338,12 @@ class Pipeline:
         if stage == "uki":
             uki.build(root, deps["tools"]["id"], deps["root"]["id"], deps["rootfs"]["id"], build_id)
             return self.build / "images" / build_id, {}
+        if stage == "pcr-sign":
+            pcr_sign.build(root, deps["tools"]["id"], deps["uki"]["id"], build_id)
+            return self.build / "images" / build_id, {}
         if stage == "sign":
-            sign.build(root, deps["tools"]["id"], deps["root"]["id"], deps["uki"]["id"], build_id)
+            sign.build(root, deps["tools"]["id"], deps["root"]["id"],
+                       deps["pcr-sign"]["id"], build_id)
             return self.build / "images" / build_id, {}
         if stage == "enroll":
             enroll.build(root, deps["firmware-sign"]["id"], deps["sign"]["id"], build_id)
@@ -343,7 +353,7 @@ class Pipeline:
                             deps["sign"]["id"], build_id)
             return self.build / "images" / build_id, {}
         if stage == "check-secure-boot":
-            secureboot.check_secure_boot(root, deps["tools"]["id"], deps["uki"]["id"],
+            secureboot.check_secure_boot(root, deps["tools"]["id"], deps["pcr-sign"]["id"],
                                          deps["sign"]["id"], deps["device"]["id"],
                                          deps["enroll"]["id"], build_id)
             return self.build / "images" / build_id, {}
@@ -409,6 +419,7 @@ class Pipeline:
         root = self.ensure("root")
         filesystem = self.ensure("rootfs")
         image = self.ensure("uki")
+        policy = self.ensure("pcr-sign")
         signatures = self.ensure("sign")
         inventory = self.ensure("sbom")
         root_output = self.build / "images" / root["id"] / "output"
@@ -418,6 +429,7 @@ class Pipeline:
                    "initrd.img": root_output / "firearc-initrd.img", "root.ext4": fs_output / fs_result["root_payload"],
                    "root.verity": fs_output / "root.verity", "verity-authority.json": fs_output / "verity-authority.json",
                    "uki-a.efi": self.build / "images" / image["id"] / "output" / device.UKI_ARTIFACT,
+                   "uki-a-pcr.efi": self.build / "images" / policy["id"] / "output" / device.UKI_ARTIFACT,
                    "uki-a-signed.efi": self.build / "images" / signatures["id"] / "output" / device.UKI_ARTIFACT,
                    "sbom.json": builder.parent(self.root) / inventory["id"] / "output" / "sbom.json"}
         directory = private_directory(self.build / "output", create=True)
@@ -449,6 +461,7 @@ def run(root, command, *, online=False):
         elif command == "firmware-sign": pipeline.ensure("firmware-sign")
         elif command == "firmware-layout": pipeline.ensure("firmware-layout")
         elif command == "uki": pipeline.ensure("uki")
+        elif command == "pcr-sign": pipeline.ensure("pcr-sign")
         elif command == "sign": pipeline.ensure("sign")
         elif command == "enroll": pipeline.ensure("enroll")
         elif command == "device": pipeline.ensure("device")

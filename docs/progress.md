@@ -1,7 +1,8 @@
 # Implementation progress
 
-**Updated:** 2026-10-20. **Stage:** build-system restructuring and clean-build
-qualification. The complete secured appliance is not yet implemented.
+**Updated:** 2026-10-21. **Stage:** enforced secure boot chain complete on
+the development trust domain; Phase 5 (TPM-bound data) in progress. The
+complete secured appliance is not yet implemented.
 
 ## Implemented
 
@@ -234,6 +235,28 @@ qualification. The complete secured appliance is not yet implemented.
   negatives shape the future PCR policy: vboot firmware identity is not
   measured, and UKI signature sections are skipped (the db digest anchor owns
   both distinctions).
+- **Signed PCR 11 authorizations embedded in the slot-A UKI** (PLAN Phase 5
+  item 5 complete; ADR 0009,
+  [validation](validation/pcr-authorizations.md); `just pcr-keys`/
+  `just pcr-sign`): a dedicated dev PCR-policy key (RSA-3072, bare PEM
+  public key — the pinned systemd-measure rejects certificates) lives under
+  `secrets/pcr/` isolated from the sb/db role; the pcr-sign stage rebuilds
+  the UKI with the pinned ukify adding `.pcrsig`/`.pcrpkey` for phase
+  **enter-initrd** only (pcrphase-initrd's /dev/tpmrm0 extend is real but
+  log-invisible; later phases stay unsigned so unlock is authorized in the
+  initrd alone). The stage fails closed on four independent agreements —
+  the from-spec stub model (name+NUL hash, VirtualSize-exact content hash,
+  table order, `.pcrsig` exempt, `.pcrpkey` measured — validated against the
+  dev5 replayed log and pinned as test goldens), the pinned
+  systemd-measure prediction, the TPM2-spec PolicyPCR digest, and openssl
+  verification of the embedded signature. Deterministic PKCS#1 v1.5 keeps
+  the policy layer byte-reproducible (double-build enforced, still covered
+  by `just reproduce`); `sign` signs this UKI so the db anchor covers the
+  policy sections, and the enforcing chain restages through it. Findings on
+  the way: `.pcrpkey` changes PCR 11 (key regenerations must and do
+  restage the chain), and section content is measured at PE VirtualSize
+  (the combined initrd's trailing cpio padding zeros and `.sbat`'s NUL are
+  measured content).
 - Operations note (recorded after investigating): external `docker image
   prune` deleted the digest-pinned tagless tools and SDK images; the harness
   now treats a cached tools stage whose image is absent from docker as stale
@@ -243,7 +266,7 @@ qualification. The complete secured appliance is not yet implemented.
 
 ## Validation
 
-The label-free bootstrap/build/verification pipeline and 137 offline tests pass.
+The label-free bootstrap/build/verification pipeline and 218 offline tests pass.
 The fresh-clone build/verification passed, and `just reproduce --yes` completed
 two empty-cache download/build/verification rounds with **byte-identical
 payloads** (kernel, initramfs, root tar, ext4, verity tree, authority). The
@@ -260,11 +283,10 @@ byte-reproducibility result is implied by the implementation list above.
 
 ## Next gates
 
-1. Phase 5 items 5–15: signed PCR 11 authorizations (per the sensitivity
-   table: bind on PCR 7 + 11, loader context PCR 9; never claim firmware
-   identity or signature presence via PCR), then per-device LUKS2 volumes,
-   escrow, `systemd-cryptenroll` with the signed policy, crypttab/unlock
-   ordering, and the move/refusal test matrix.
+1. Phase 5 items 6–15: per-device LUKS2 volumes, escrow,
+   `systemd-cryptenroll` with PCR 7 binding plus the signed PCR 11 policy
+   (item 5's `enter-initrd` authorizations are in the UKI now),
+   crypttab/unlock ordering, and the move/refusal test matrix.
 2. Phase 6+ (RAUC updates, health/rollback, attestation, recovery, release
    hardening/CI) per PLAN §1.2 after the data-unlock chain lands.
 G0/G1/G3 and later acceptance gates remain open. Hardware, legal review,

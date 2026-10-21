@@ -58,13 +58,17 @@ class SignTests(unittest.TestCase):
         self.assertFalse(sign.covers_content(signed, signed))
         self.assertFalse(sign.covers_content(b"ELF", signed))
 
-    def test_stage_wiring_puts_signing_between_uki_and_device(self):
-        self.assertEqual(pipeline.DEPENDENCIES["sign"], ("tools", "root", "uki"))
+    def test_stage_wiring_puts_pcr_signing_between_uki_and_signing(self):
+        self.assertEqual(pipeline.DEPENDENCIES["pcr-sign"], ("tools", "uki"))
+        self.assertEqual(pipeline.DEPENDENCIES["sign"], ("tools", "root", "pcr-sign"))
         self.assertEqual(pipeline.DEPENDENCIES["device"], ("tools", "rootfs", "sign"))
-        # Regenerating the custody manifest restages signatures; unrelated
+        # Regenerating either custody manifest restages signatures; unrelated
         # source churn alone does not.
         self.assertEqual(pipeline.Pipeline.STAGE_INPUTS["sign"],
                          ["secrets/manifest.json", "src/firearc/sign.py"])
+        self.assertEqual(pipeline.Pipeline.STAGE_INPUTS["pcr-sign"],
+                         ["secrets/pcr/manifest.json", "secrets/pcr/pcr.key",
+                          "secrets/pcr/pcr.pub", "src/firearc/pcr_sign.py"])
 
     def test_loader_member_is_the_root_archive_loader(self):
         self.assertEqual(sign.LOADER_ARTIFACT, "systemd-bootx64.efi")

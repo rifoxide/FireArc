@@ -60,12 +60,14 @@ def pe_sections(binary):
         if offset + 40 > len(binary):
             raise SafetyError("PE section table is truncated")
         name = binary[offset:offset + 8].rstrip(b"\0").decode("ascii", "replace")
-        _, _, raw_size, raw_pointer = struct.unpack_from("<IIII", binary, offset + 8)
+        virtual_size, _, raw_size, raw_pointer = struct.unpack_from("<IIII", binary, offset + 8)
         if raw_pointer + raw_size > len(binary):
             raise SafetyError(f"Section {name} points outside the PE image")
+        if virtual_size > raw_size:
+            raise SafetyError(f"Section {name} has VirtualSize beyond its raw data")
         digest = hashlib.sha256(binary[raw_pointer:raw_pointer + raw_size]).hexdigest()
         sections.append({"name": name, "bytes": raw_size, "offset": raw_pointer,
-                         "sha256": digest})
+                         "virtual_size": virtual_size, "sha256": digest})
     return sections, timestamp
 
 
@@ -161,6 +163,14 @@ def build(root, tools_label, root_label, rootfs_label, label):
                 raise SafetyError(f"Embedded {name} section does not carry its input file")
         uki = output / device.UKI_ARTIFACT
         shutil.move(str(built), str(uki))
+        # Publish the exact section inputs beside the UKI: the PCR-policy
+        # stage rebuilds from precisely these receipt-covered bytes. The
+        # disposable rebuild evidence stays in the staging area.
+        published = {}
+        for name in ("kernel", "initrd.img", "cmdline", "os-release",
+                     "linuxx64.efi.stub"):
+            shutil.move(str(staging / name), str(output / name))
+            published[name] = sha256(output / name)
         write_json(work / "uki.json", {
             "schema": 1, "uki": device.UKI_ARTIFACT, "slot": "A",
             "uname": release, "cmdline": device.KERNEL_CMDLINE,
@@ -169,14 +179,16 @@ def build(root, tools_label, root_label, rootfs_label, label):
             "inputs": {"root_label": root_label, "rootfs_label": rootfs_label,
                        "root_tar_sha256": sha256(archive),
                        "kernel_sha256": sha256(kernel), "initrd_sha256": sha256(initrd),
-                       "combined_initrd_sha256": sha256(staging / "initrd.img"),
+                       "combined_initrd_sha256": published["initrd.img"],
                        "dev_cpio_sha256": sha256(work / "dev.cpio"),
-                       "stub_sha256": sha256(stub), "os_release_sha256": sha256(osrel),
+                       "stub_sha256": published["linuxx64.efi.stub"],
+                       "os_release_sha256": published["os-release"],
                        "authority_sha256": sha256(payload_output / "verity-authority.json")},
             "byte_identical_rebuild": True,
             "scope": "Unsigned development UKI; not signed, not Secure Boot, not a release artifact"})
         write_json(work / "result.json", {
-            "passed": True, "artifacts": {device.UKI_ARTIFACT: sha256(uki)},
+            "passed": True,
+            "artifacts": {device.UKI_ARTIFACT: sha256(uki), **published},
             "byte_identical_rebuild": True, "sections_verified": True,
             "uki_unsigned": True, "boot_chain_qualified": False,
             "scope": "UKI constructed from frozen payloads; unsigned and not yet booted"})

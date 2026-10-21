@@ -27,7 +27,8 @@ just verify-build    # static initrd/unit checks and filesystem corruption tests
 
 Generated binaries have stable paths under **`build/output/`**:
 `kernel.efi`, `initrd.img`, `root.tar`, `root.ext4`, `root.verity`,
-`verity-authority.json`, and `sbom.json`. Dependencies and successful builds
+`verity-authority.json`, `uki-a.efi`, `uki-a-pcr.efi`, `uki-a-signed.efi`,
+and `sbom.json`. Dependencies and successful builds
 are selected automatically; commands never require manual attempt labels.
 
 Git contains source, configuration and exact version/URL/hash locks—not package
@@ -70,7 +71,8 @@ RAUC activation/rollback, recovery and hardware acceptance remain pending.
 Useful commands: `just status`, `just build-tools`, `just build-root`,
 `just build-rootfs`, `just check-initrd`, `just check-rootfs`, `just sbom`,
 `just firmware-sources --online`, `just firmware-build`, `just firmware-layout`,
-`just uki`, `just sign`, `just enroll`, `just device`, `just check-boot`,
+`just uki`, `just pcr-keys`, `just pcr-sign`, `just sign`, `just enroll`,
+`just device`, `just check-boot`,
 `just device-provision`, `just device-boot`,
 `just device-reboot`, `just device-stop`, `just device-powercut`,
 `just device-snapshot`, `just device-restore`, `just prune`.

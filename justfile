@@ -91,6 +91,11 @@ keys:
 vboot-keys:
     python3 -B scripts/firearc.py vboot-keys
 
+# Generate (once) the development PCR-policy key under gitignored secrets/pcr/
+# (a role distinct from the db/sb signer, per PLAN Phase 5 item 5).
+pcr-keys:
+    python3 -B scripts/firearc.py pcr-keys
+
 # Build the pinned vboot futility signing tool from the firmware sources.
 futility *options:
     python3 -B scripts/firearc.py futility "$@"
@@ -102,6 +107,11 @@ firmware-sign:
 # Build the unsigned slot-A UKI from the frozen payloads (pinned ukify).
 uki *options:
     python3 -B scripts/firearc.py uki "$@"
+
+# Rebuild the UKI with signed PCR 11 policy sections (.pcrsig/.pcrpkey,
+# pinned ukify + systemd-measure; requires `just pcr-keys`).
+pcr-sign *options:
+    python3 -B scripts/firearc.py pcr-sign "$@"
 
 # Sign the UKI and systemd-boot loader with the development sb key
 # (requires `just keys`; the signing container sees only sb.key/sb.crt).

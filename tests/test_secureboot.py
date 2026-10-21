@@ -77,7 +77,7 @@ class VariantTests(unittest.TestCase):
 
     def test_stage_wiring(self):
         self.assertEqual(pipeline.DEPENDENCIES["check-secure-boot"],
-                         ("tools", "uki", "sign", "device", "enroll"))
+                         ("tools", "pcr-sign", "sign", "device", "enroll"))
         self.assertNotIn("check-secure-boot", pipeline.Pipeline.STAGE_INPUTS)
 
 

@@ -6,7 +6,7 @@ from pathlib import Path
 import subprocess
 import sys
 
-from . import builder, keys, pipeline, profile, vboot_keys
+from . import builder, keys, pipeline, pcr_keys, profile, vboot_keys
 from .host import doctor, scan_repository
 from .inputs import validate_locks
 from .integrity import SafetyError
@@ -23,7 +23,9 @@ def main():
         "keys", help="Generate (once) the development signing hierarchy under secrets/")
     commands.add_parser(
         "vboot-keys", help="Generate (once) the development vboot keyset under secrets/vboot/")
-    for name in ("bootstrap", "build-tools", "build-root", "build-rootfs", "build", "sbom", "firmware-sources", "firmware-build", "futility", "firmware-sign", "firmware-layout", "uki", "sign", "enroll", "device", "check-boot", "check-secure-boot", "check-firmware-vboot", "check-initrd", "check-rootfs", "verify-build"):
+    commands.add_parser(
+        "pcr-keys", help="Generate (once) the development PCR-policy key under secrets/pcr/")
+    for name in ("bootstrap", "build-tools", "build-root", "build-rootfs", "build", "sbom", "firmware-sources", "firmware-build", "futility", "firmware-sign", "firmware-layout", "uki", "pcr-sign", "sign", "enroll", "device", "check-boot", "check-secure-boot", "check-firmware-vboot", "check-initrd", "check-rootfs", "verify-build"):
         command = commands.add_parser(name)
         command.add_argument("--online", action="store_true", help="Allow pinned dependency downloads")
     for name in ("clean", "reproduce"):
@@ -80,6 +82,10 @@ def main():
                 pipe = pipeline.Pipeline(ROOT)
                 result = vboot_keys.ensure(ROOT, pipe.ensure("tools")["id"],
                                            pipe.ensure("futility")["id"])
+        elif args.command == "pcr-keys":
+            with pipeline.project_lock(ROOT):
+                pipe = pipeline.Pipeline(ROOT)
+                result = pcr_keys.ensure(ROOT, pipe.ensure("tools")["id"])
         elif args.command == "clean":
             with pipeline.project_lock(ROOT): pipeline.clean(ROOT, confirmed=args.yes)
             result = {"passed": True, "removed": "build/"}

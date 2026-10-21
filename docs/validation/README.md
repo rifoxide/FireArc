@@ -9,6 +9,7 @@
 | vboot adoption investigation (no adoption yet) | [Firmware vboot](firmware-vboot.md) |
 | Persistent installed-device profile with swtpm | [Device profile](device-profile.md) |
 | TPM event-log capture, PCR replay and sensitivity | [TPM measurements](tpm-measurements.md) |
+| Signed PCR 11 authorizations in the UKI | [PCR authorizations](pcr-authorizations.md) |
 
 The preliminary CycloneDX inventory (`just sbom`) is generated deterministically
 from the locked root closure; its scope limits are stated in the document

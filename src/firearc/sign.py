@@ -1,21 +1,22 @@
 """Isolated signing step for the development boot artifacts.
 
-Signs the byte-stable Unified Kernel Image and the systemd-boot loader with
+Signs the PCR-policy-carrying Unified Kernel Image (built by the pcr-sign
+stage from the byte-stable uki output) and the systemd-boot loader with
 the development image-signing key. The signing container sees exactly two
 files from the custody tree — sb.key and sb.crt, both read-only — satisfying
 the plan's rule that an isolated signing step receives only the required
-private key; PK/KEK material and everything else under secrets/ stay
-unreachable. Every signed image is verified (sbverify) and structurally
-checked (covers_content): apart from the recomputed PE checksum and the
-Certificate Table directory entry, the signed image must equal the unsigned
-artifact byte for byte, with the appended region being exactly the described
-certificate — proving the signature covers the exact content the uki/root
-stages produced.
+private key; PK/KEK material, the PCR-policy key and everything else under
+secrets/ stay unreachable. Every signed image is verified (sbverify) and
+structurally checked (covers_content): apart from the recomputed PE
+checksum and the Certificate Table directory entry, the signed image must
+equal the unsigned artifact byte for byte, with the appended region being
+exactly the described certificate — proving the signature covers the exact
+content the upstream stages produced, .pcrsig and .pcrpkey included.
 
 sbsign embeds a signing time, so the signature layer is NOT byte-reproducible
 across rebuilds; this is recorded honestly instead of hidden. Reproducibility
 claims attach to the covered content, whose digest is recorded and checked
-against the unsigned artifact.
+against the pcr-sign artifact.
 """
 
 from pathlib import Path
@@ -92,10 +93,12 @@ def build(root, tools_label, root_label, uki_label, label):
     builder.verify_tools(root, tools_label)
     _, root_output, _ = device._stage_outputs(root, root_label, "appliance-root")
     archive = regular_file(root_output, "firearc-root.tar")
-    _, uki_output, uki_result = device._stage_outputs(root, uki_label, "uki")
+    _, uki_output, uki_result = device._stage_outputs(root, uki_label, "pcr-sign")
     unsigned_uki = regular_file(uki_output, device.UKI_ARTIFACT)
     if not uki_result.get("byte_identical_rebuild") or not uki_result.get("sections_verified"):
         raise SafetyError("Expected a byte-stable, section-verified UKI to sign")
+    if not uki_result.get("pcr_signed") or not uki_result.get("pcrsig_verified"):
+        raise SafetyError("Expected a verified PCR policy inside the UKI to sign")
 
     tools_work = builder.parent(root) / identifier(tools_label)
     image = read_json(regular_file(tools_work, "export-result.json"))["image_id"]
@@ -135,7 +138,8 @@ def build(root, tools_label, root_label, uki_label, label):
             if name == device.UKI_ARTIFACT:
                 sections, _ = uki_module.pe_sections(regular_file(payload, name).read_bytes())
                 names = {section["name"] for section in sections}
-                missing = [item for item in uki_module.REQUIRED_SECTIONS if item not in names]
+                missing = [item for item in (*uki_module.REQUIRED_SECTIONS,
+                                             ".pcrsig", ".pcrpkey") if item not in names]
                 if missing:
                     raise SafetyError(f"Signed UKI lost required sections: {missing}")
             shutil.move(str(payload / name), str(output / name))
@@ -145,14 +149,18 @@ def build(root, tools_label, root_label, uki_label, label):
             "content_sha256": content,
             "loader_source": {"root_label": root_label, "member": LOADER_MEMBER,
                               "root_tar_sha256": sha256(archive)},
-            "uki_source": {"uki_label": uki_label,
-                           "unsigned_sha256": sha256(unsigned_uki)},
+            "uki_source": {"pcr_sign_label": uki_label,
+                           "unsigned_sha256": sha256(unsigned_uki),
+                           "pcr_phases": uki_result.get("phases"),
+                           "expected_pcr11": uki_result.get("expected_pcr11"),
+                           "pcr_policy_fingerprint": uki_result.get("public_key_fingerprint")},
             "signature_layer_byte_reproducible": False,
             "signature_layer_note": "sbsign embeds a signing time; reproducibility "
                                     "attaches to the covered content digest above",
             "tools_image": image,
             "custody": "Development sb key (ADR 0006); only sb.key/sb.crt entered "
-                       "the signing container, read-only",
+                       "the signing container, read-only; the PCR-policy key "
+                       "never enters it",
             "scope": "Development signatures; not production signing custody"})
         write_json(work / "result.json", {
             "passed": True,
@@ -161,9 +169,11 @@ def build(root, tools_label, root_label, uki_label, label):
             "signed": True, "signatures_verified": True,
             "covers_exact_unsigned_content": True,
             "signer_fingerprint": signer,
+            "pcr_policy_carried": True,
             "boot_chain_qualified": False,
-            "scope": "Boot artifacts signed and verified; Secure Boot enforcement "
-                     "still requires variable-store enrollment"})
+            "scope": "Boot artifacts signed and verified, PCR policy inside; "
+                     "Secure Boot enforcement still requires variable-store "
+                     "enrollment"})
     except Exception as error:
         write_json(work / "result.json", {"passed": False, "error": str(error),
                                           "boot_chain_qualified": False})

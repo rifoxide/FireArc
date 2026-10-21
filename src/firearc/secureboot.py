@@ -22,9 +22,9 @@ variable each:
                        SecureBoot variable the firmware honours).
 * ``tampered``       — one content byte flipped inside the signed UKI's
                        .linux section: a different digest, must be refused.
-* ``modified``       — the unsigned UKI with a perturbed .cmdline byte: a
-                       genuinely different image (different command line),
-                       must be refused.
+* ``modified``       — the PCR-carrying unsigned UKI with a perturbed
+                       .cmdline byte: a genuinely different image (different
+                       command line), must be refused.
 * ``tampered-loader``— one byte flipped inside the ESP loader: the firmware
                        must refuse the boot manager itself.
 
@@ -151,10 +151,10 @@ def check_secure_boot(root, tools_label, uki_label, sign_label, device_label,
                       enroll_label, label):
     """Boot the enrolled firmware and prove signature enforcement."""
     builder.verify_tools(root, tools_label)
-    _, uki_output, uki_result = device._stage_outputs(root, uki_label, "uki")
+    _, uki_output, uki_result = device._stage_outputs(root, uki_label, "pcr-sign")
     unsigned_uki = regular_file(uki_output, device.UKI_ARTIFACT)
-    if not uki_result.get("byte_identical_rebuild"):
-        raise SafetyError("Expected the byte-stable unsigned UKI variant")
+    if not uki_result.get("byte_identical_rebuild") or not uki_result.get("pcrsig_verified"):
+        raise SafetyError("Expected the byte-stable, PCR-signed unsigned UKI variant")
     _, sign_output, sign_result = device._stage_outputs(root, sign_label, "sign")
     signed_uki = regular_file(sign_output, device.UKI_ARTIFACT)
     loader = regular_file(sign_output, "systemd-bootx64.efi")
@@ -197,10 +197,10 @@ def check_secure_boot(root, tools_label, uki_label, sign_label, device_label,
     payload.mkdir(mode=0o700)
     try:
         # Variant payloads: the signed UKI with one tampered kernel byte, the
-        # unsigned UKI with a perturbed command line, and the loader with one
-        # tampered byte. Content modifications change the digest the firmware
-        # anchors on; same-content signature changes are indistinguishable
-        # under digest anchoring (see the module docstring).
+        # PCR-carrying unsigned UKI with a perturbed command line, and the
+        # loader with one tampered byte. Content modifications change the
+        # digest the firmware anchors on; same-content signature changes are
+        # indistinguishable under digest anchoring (see the module docstring).
         shutil.copyfile(unsigned_uki, payload / "modified.efi")
         modified, modify_offset = modify_uki(unsigned_uki.read_bytes())
         (payload / "modified.efi").write_bytes(modified)
