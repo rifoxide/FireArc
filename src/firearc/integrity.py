@@ -126,8 +126,10 @@ def private_directory(path, *, create=False):
 
 
 def identifier(value):
-    if not re.fullmatch(r"[a-z][a-z0-9-]{0,31}", value):
-        raise SafetyError("Identifier must be 1–32 lowercase letters/digits/hyphens, starting with a letter")
+    # Long enough for "<stage-name>-<12 hex>" build ids with full stage names
+    # ("check-firmware-vboot-0123456789ab"); still tight, lowercase, hyphens.
+    if not re.fullmatch(r"[a-z][a-z0-9-]{0,47}", value):
+        raise SafetyError("Identifier must be 1–48 lowercase letters/digits/hyphens, starting with a letter")
     return value
 
 

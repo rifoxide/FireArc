@@ -45,6 +45,32 @@ class FirmwareBuildTests(unittest.TestCase):
         self.assertEqual(firmware_build.PAYLOAD_WORKSPACE.as_posix(),
                          "payloads/external/edk2/workspace/Dasharo")
 
+    def test_shipped_configuration_names_a_valid_tracked_flash_layout(self):
+        layout = firmware_build.fmd_reference(CONFIGURATION)
+        self.assertEqual(layout, "q35-vboot.fmd")
+        fmd = (ROOT / "images/firmware" / layout).read_text()
+        firmware_build.check_fmd(layout, fmd)
+
+    def test_flash_layout_validation_fails_closed(self):
+        good = (ROOT / "images/firmware" / "q35-vboot.fmd").read_text()
+        cases = {"path traversal": ("../../etc/passwd", good),
+                 "not an fmd": ("layout.txt", good),
+                 "missing SMMSTORE": ("q35-vboot.fmd", good.replace("SMMSTORE 0x40000", "STORE 0x40000")),
+                 "wrong SMMSTORE size": ("q35-vboot.fmd", good.replace("SMMSTORE 0x40000", "SMMSTORE 0x30000")),
+                 "missing RW_NVRAM": ("q35-vboot.fmd", good.replace("RW_NVRAM", "NVRAM")),
+                 "missing WP_RO": ("q35-vboot.fmd", good.replace("WP_RO", "RO")),
+                 "missing vblock": ("q35-vboot.fmd", good.replace("VBLOCK_A", "BLOCK_A")),
+                 "missing GBB": ("q35-vboot.fmd", good.replace("GBB", "GB")),
+                 "wrong image size": ("q35-vboot.fmd", good.replace("0x800000", "0x400000"))}
+        for name, (layout, text) in cases.items():
+            with self.subTest(case=name), self.assertRaises(SafetyError):
+                firmware_build.check_fmd(layout, text)
+
+    def test_fmd_reference_absent_for_default_layout(self):
+        self.assertIsNone(firmware_build.fmd_reference("CONFIG_VBOOT=y\n"))
+        self.assertEqual(firmware_build.fmd_reference('CONFIG_FMDFILE="q35-vboot.fmd"\n'),
+                         "q35-vboot.fmd")
+
     def test_payload_description_files_follow_the_flash_definition(self):
         with temporary() as workspace:
             package = workspace / "DasharoPayloadPkg"

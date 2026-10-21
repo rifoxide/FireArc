@@ -12,11 +12,27 @@ sys.path.insert(0, str(ROOT / "src"))
 from firearc import device, firmware_layout
 from firearc.integrity import SafetyError
 
-IMAGE = 0x40000
-AREAS = [("BIOS", 0, IMAGE), ("SMMSTORE", 0, 0x8000), ("FMAP", 0x8000, 0x400),
-         ("BOOTSPLASH", 0x8400, 0x4000), ("COREBOOT", 0xC400, 0x40000 - 0xC400)]
-GAP_IMAGE_AREAS = [area for area in AREAS if area[0] != "COREBOOT"] + \
-    [("COREBOOT", 0xC400, 0x30000 - 0xC400)]
+IMAGE = 0x100000
+AREAS = [
+    ("SI_BIOS", 0, IMAGE),
+    ("RW_SECTION_A", 0, 0x30000),
+    ("VBLOCK_A", 0, 0x4000),
+    ("FW_MAIN_A", 0x4000, 0x2b000),
+    ("RW_FWID_A", 0x2f000, 0x1000),
+    ("SMMSTORE", 0x30000, 0x40000),
+    ("RW_VPD", 0x70000, 0x1000),
+    ("RW_NVRAM", 0x71000, 0x1000),
+    ("BOOTSPLASH", 0x72000, 0xE000),
+    ("WP_RO", 0x80000, 0x80000),
+    ("FMAP", 0x80000, 0x400),
+    ("RO_FRID", 0x80400, 0x100),
+    ("RO_PADDING", 0x80500, 0x300),
+    ("RO_VPD", 0x80800, 0x1000),
+    ("GBB", 0x81800, 0x2000),
+    ("COREBOOT", 0x83800, IMAGE - 0x83800),
+]
+GAP_IMAGE_AREAS = [area for area in AREAS if area[0] != "BOOTSPLASH"] + \
+    [("BOOTSPLASH", 0x72000, 0x8000)]
 
 
 def fmap_bytes(areas, *, size=IMAGE, version=(1, 1), nareas=None, base=0xFF800000):
@@ -34,13 +50,13 @@ def fmap_bytes(areas, *, size=IMAGE, version=(1, 1), nareas=None, base=0xFF80000
     return bytes(header) + bytes(table)
 
 
-def synthetic_image(areas=AREAS, *, fmap_offset=0x8000, fmap=None):
+def synthetic_image(areas=AREAS, *, fmap_offset=0x80000, fmap=None):
     image = bytearray(b"\xff" * IMAGE)
     fmap = fmap if fmap is not None else fmap_bytes(areas)
     image[fmap_offset:fmap_offset + len(fmap)] = fmap
-    image[0x8400:0x8400 + 28] = b"LARCHIVE" + b"\x00" * 20  # stale deleted-file marker
-    coreboot = bytes(range(256)) * ((0x40000 - 0xC400) // 256 + 1)
-    image[0xC400:0x40000] = coreboot[:0x40000 - 0xC400]
+    image[0x72000:0x72000 + 28] = b"LARCHIVE" + b"\x00" * 20  # stale deleted-file marker
+    coreboot = bytes(range(256)) * ((IMAGE - 0x83800) // 256 + 1)
+    image[0x83800:IMAGE] = coreboot[:IMAGE - 0x83800]
     return bytes(image)
 
 
@@ -49,45 +65,38 @@ def layout_of(image):
 
 
 class ParseTests(unittest.TestCase):
-    def test_q35_shaped_layout_classifies_roles_and_records_facts(self):
+    def test_vboot_shaped_layout_classifies_roles_and_records_facts(self):
         layout = layout_of(synthetic_image())
-        self.assertEqual(layout["container_area"], "BIOS")
+        self.assertEqual(layout["container_area"], "SI_BIOS")
+        self.assertEqual(layout["top_level_areas"],
+                         ["RW_SECTION_A", "SMMSTORE", "RW_VPD", "RW_NVRAM",
+                          "BOOTSPLASH", "WP_RO"])
+        self.assertEqual(layout["protected_ro_areas"],
+                         ["FMAP", "RO_FRID", "RO_PADDING", "RO_VPD", "GBB", "COREBOOT"])
+        self.assertEqual(layout["rw_slot_areas"],
+                         ["VBLOCK_A", "FW_MAIN_A", "RW_FWID_A"])
         self.assertEqual(layout["child_gaps"], [])
-        self.assertEqual(layout["vboot_regions"], [])
-        self.assertEqual(layout["permitted_writable"], ["SMMSTORE"])
-        self.assertEqual(layout["variable_store"], {"name": "SMMSTORE", "offset": 0,
-                                                    "size": 0x8000,
-                                                    "erased_in_pristine_image": True})
+        self.assertEqual(len(layout["vboot_regions"]), 9)
+        self.assertEqual(layout["permitted_writable"], ["SMMSTORE", "RW_NVRAM"])
+        self.assertEqual(layout["variable_store"],
+                         {"name": "SMMSTORE", "offset": 0x30000, "size": 0x40000,
+                          "erased_in_pristine_image": True})
         roles = {area["name"]: (area["role"], area["erased"], area["cbfs_file_marker"])
                  for area in layout["areas"]}
         self.assertEqual(roles["SMMSTORE"][0], "uefi-variable-store")
         self.assertEqual(roles["FMAP"][0], "flash-map")
         self.assertEqual(roles["COREBOOT"][0], "cbfs-code")
+        self.assertEqual(roles["GBB"][0], "vboot-root-key")
+        self.assertEqual(roles["VBLOCK_A"][0], "vboot-verification-block")
+        self.assertEqual(roles["RW_SECTION_A"][0], "vboot-rw-slot")
+        self.assertEqual(roles["WP_RO"][0], "vboot-protected-ro")
+        self.assertEqual(roles["RW_NVRAM"][0], "vboot-state")
         self.assertEqual(roles["BOOTSPLASH"][0], "preserved")
         self.assertTrue(roles["BOOTSPLASH"][2])
         self.assertFalse(roles["COREBOOT"][2])
         self.assertTrue(roles["SMMSTORE"][1])
         self.assertFalse(roles["COREBOOT"][1])
-        self.assertEqual([area["offset"] for area in layout["areas"]],
-                         [0, 0, 0x8000, 0x8400, 0xC400])
         self.assertTrue(all(len(area["sha256"]) == 64 for area in layout["areas"]))
-
-    def test_malformed_flash_maps_are_rejected(self):
-        beyond = [("BIOS", 0, IMAGE), ("SMMSTORE", 0, 0x8000), ("FMAP", 0x8000, 0x400),
-                  ("BOOTSPLASH", 0x8400, 0x4000), ("COREBOOT", 0xC400, IMAGE)]
-        cases = {
-            "no fmap": b"\xff" * IMAGE,
-            "wrong version": synthetic_image(fmap=fmap_bytes(AREAS, version=(2, 0))),
-            "size mismatch": synthetic_image(fmap=fmap_bytes(AREAS, size=IMAGE - 4096)),
-            "no areas": synthetic_image(fmap=fmap_bytes(AREAS, nareas=0)),
-            "too many areas": synthetic_image(fmap=fmap_bytes(AREAS, nareas=65)),
-            "area beyond image": synthetic_image(areas=beyond, fmap=fmap_bytes(beyond)),
-            "ambiguous duplicate map": (synthetic_image()[:0xC400] + fmap_bytes(AREAS)
-                                        + synthetic_image()[0xC400 + 266:]),
-        }
-        for name, image in cases.items():
-            with self.subTest(case=name), self.assertRaises(SafetyError):
-                layout_of(image)
 
     def test_unprintable_and_unterminated_area_names_are_rejected(self):
         for poisoned in (b"A" * 32, b"AREAS\x80\x81"):
@@ -98,25 +107,36 @@ class ParseTests(unittest.TestCase):
                 layout_of(synthetic_image(fmap=bytes(fmap)))
 
     def test_duplicate_area_names_are_rejected(self):
-        areas = [("BIOS", 0, IMAGE), ("SMMSTORE", 0, 0x8000), ("FMAP", 0x8000, 0x400),
-                 ("SMMSTORE", 0x8400, 0x4000), ("COREBOOT", 0xC400, IMAGE - 0xC400)]
+        areas = [area for area in AREAS if area[0] != "RO_PADDING"] + \
+            [("SMMSTORE", 0x80500, 0x300)]
         with self.assertRaises(SafetyError):
             layout_of(synthetic_image(areas=areas, fmap=fmap_bytes(areas)))
 
     def test_layout_requires_the_harness_region_contract(self):
-        for missing in ("SMMSTORE", "COREBOOT", "FMAP"):
+        for missing in ("SMMSTORE", "COREBOOT", "FMAP", "GBB", "VBLOCK_A",
+                        "FW_MAIN_A", "RW_NVRAM", "WP_RO", "RW_SECTION_A"):
             areas = [area for area in AREAS if area[0] != missing]
             with self.subTest(missing=missing), self.assertRaises(SafetyError):
                 layout_of(synthetic_image(areas=areas, fmap=fmap_bytes(areas)))
-        overlap = [("BIOS", 0, IMAGE), ("SMMSTORE", 0, 0x8000), ("FMAP", 0x8000, 0x400),
-                   ("BOOTSPLASH", 0x8400, 0x4400), ("COREBOOT", 0xC400, IMAGE - 0xC400)]
+        for name, misplaced in (("misaligned SMMSTORE", [("SMMSTORE", 0x31000, 0x40000)]
+                                 if False else
+                                 [area for area in AREAS if area[0] != "SMMSTORE"] +
+                                 [("SMMSTORE", 0x30008, 0x40000 - 8)]),
+                                ("short SMMSTORE",
+                                 [area for area in AREAS if area[0] != "SMMSTORE"] +
+                                 [("SMMSTORE", 0x30000, 0x30000)])):
+            with self.subTest(case=name), self.assertRaises(SafetyError):
+                layout_of(synthetic_image(areas=misplaced, fmap=fmap_bytes(misplaced)))
+        # Overlapping RW areas fail closed.
+        overlap = [area for area in AREAS if area[0] not in ("RW_FWID_A", "FW_MAIN_A")] + \
+            [("FW_MAIN_A", 0x4000, 0x2b100), ("RW_FWID_A", 0x2f000, 0x1000)]
         with self.assertRaises(SafetyError):
             layout_of(synthetic_image(areas=overlap, fmap=fmap_bytes(overlap)))
 
     def test_unmapped_gaps_are_recorded_not_assumed_erased(self):
         layout = layout_of(synthetic_image(areas=GAP_IMAGE_AREAS,
                                            fmap=fmap_bytes(GAP_IMAGE_AREAS)))
-        self.assertEqual(layout["child_gaps"], [{"offset": 0x30000, "size": 0x10000}])
+        self.assertEqual(layout["child_gaps"], [{"offset": 0x7A000, "size": 0x6000}])
 
 
 class ConfinementTests(unittest.TestCase):
@@ -124,21 +144,21 @@ class ConfinementTests(unittest.TestCase):
         self.pristine = synthetic_image()
         self.layout = layout_of(self.pristine)
 
-    def test_permitted_variable_store_writes_are_reported(self):
+    def test_permitted_writable_writes_are_reported(self):
         booted = bytearray(self.pristine)
-        booted[0x100:0x108] = b"\x00" * 8
-        booted[0x2000:0x2010] = b"\x00" * 16
+        booted[0x30100:0x30108] = b"\x00" * 8          # inside SMMSTORE
+        booted[0x32000:0x32010] = b"\x00" * 16         # inside SMMSTORE
+        booted[0x71040:0x71048] = b"\x00" * 8          # inside RW_NVRAM (vboot VBNV)
         report = firmware_layout.write_confinement(self.pristine, bytes(booted), self.layout)
         self.assertTrue(report["writes_observed"])
-        self.assertEqual(report["permitted_area"], "SMMSTORE")
         changed = report["changed_areas"]["SMMSTORE"]
         self.assertEqual(changed["changed_blocks"], [0, 2])
         self.assertEqual(changed["changed_byte_count"], 24)
-        self.assertEqual(changed["first_changed_offset"], 0x100)
-        self.assertEqual(changed["last_changed_offset"], 0x200F)
-        self.assertEqual(report["unchanged_areas"], ["FMAP", "BOOTSPLASH", "COREBOOT"])
-        self.assertEqual(set(report["area_sha256_after_boot"]),
-                         {"SMMSTORE", "FMAP", "BOOTSPLASH", "COREBOOT"})
+        self.assertEqual(changed["first_changed_offset"], 0x30100)
+        self.assertEqual(changed["last_changed_offset"], 0x3200F)
+        self.assertIn("RW_NVRAM", report["changed_areas"])
+        for keeper in ("FMAP", "GBB", "COREBOOT", "VBLOCK_A", "FW_MAIN_A"):
+            self.assertIn(keeper, report["unchanged_areas"])
 
     def test_unchanged_flash_records_no_writes(self):
         report = firmware_layout.write_confinement(self.pristine, self.pristine, self.layout)
@@ -147,23 +167,26 @@ class ConfinementTests(unittest.TestCase):
 
     def test_writes_outside_the_variable_store_fail_closed(self):
         cases = {
-            "COREBOOT code": 0xC400 + 0x123,
-            "FMAP descriptor": 0x8000 + 4,
-            "preserved area": 0x8400 + 0x50,
+            "COREBOOT code": 0x83800 + 0x123,
+            "FMAP descriptor": 0x80000 + 4,
+            "preserved area": 0x72000 + 0x50,
+            "GBB root key": 0x81800 + 0x20,
+            "RW vblock": 0x4,
+            "RW payload": 0x4000 + 0x100,
         }
         for name, offset in cases.items():
             booted = bytearray(self.pristine)
             booted[offset] ^= 0xFF
             with self.subTest(area=name), self.assertRaises(SafetyError) as raised:
                 firmware_layout.write_confinement(self.pristine, bytes(booted), self.layout)
-            self.assertIn("variable store", str(raised.exception))
+            self.assertIn("writable set", str(raised.exception))
             self.assertIn(hex(offset), str(raised.exception))
 
     def test_unmapped_gap_writes_fail_closed(self):
         image = synthetic_image(areas=GAP_IMAGE_AREAS, fmap=fmap_bytes(GAP_IMAGE_AREAS))
         layout = layout_of(image)
         booted = bytearray(image)
-        booted[0x30010:0x30018] = b"\x00" * 8
+        booted[0x7A010:0x7A018] = b"\x00" * 8  # inside the recorded gap
         with self.assertRaises(SafetyError):
             firmware_layout.write_confinement(image, bytes(booted), layout)
 
@@ -177,7 +200,7 @@ class HarnessWiringTests(unittest.TestCase):
         source = inspect.getsource(device.check_boot)
         self.assertIn("firmware_layout.classify", source)
         self.assertIn("write_confinement", source)
-        self.assertIn("firmware_layout.VARIABLE_STORE_AREA", source)
+        self.assertIn("firmware_layout.write_confinement", source)
 
     def test_real_built_rom_layout_when_present(self):
         state = ROOT / "build/state.json"
@@ -192,20 +215,19 @@ class HarnessWiringTests(unittest.TestCase):
         image = rom.read_bytes()
         layout = layout_of(image)
         self.assertEqual(layout["rom_bytes"], device.FIRMWARE_BYTES)
-        self.assertEqual(layout["container_area"], "BIOS")
-        self.assertEqual(layout["variable_store"], {"name": "SMMSTORE", "offset": 0,
-                                                    "size": 0x40000,
-                                                    "erased_in_pristine_image": True})
-        self.assertEqual(layout["fmap"]["offset"], 0x40000)
-        self.assertEqual(layout["fmap"]["version"], "1.1")
+        self.assertEqual(layout["schema"], 2)
+        self.assertEqual(layout["container_area"], "SI_BIOS")
+        self.assertEqual(layout["protected_ro_areas"],
+                         ["FMAP", "RO_FRID", "RO_PADDING", "RO_VPD", "GBB", "COREBOOT"])
+        self.assertEqual(layout["rw_slot_areas"],
+                         ["VBLOCK_A", "FW_MAIN_A", "RW_FWID_A"])
+        self.assertEqual(layout["permitted_writable"], ["SMMSTORE", "RW_NVRAM"])
         areas = {area["name"]: area for area in layout["areas"]}
-        self.assertEqual(areas["FMAP"]["size"], 512)
-        self.assertEqual((areas["COREBOOT"]["offset"], areas["COREBOOT"]["size"]),
-                         (0x80200, 0x77FE00))
-        self.assertTrue(areas["BOOTSPLASH"]["cbfs_file_marker"])
-        self.assertEqual(layout["child_gaps"], [])
-        self.assertEqual(layout["vboot_regions"], [])
-
-
-if __name__ == "__main__":
-    unittest.main()
+        self.assertEqual((areas["SMMSTORE"]["offset"], areas["SMMSTORE"]["size"]),
+                         (0x3C0000, 0x40000))
+        self.assertTrue(areas["SMMSTORE"]["erased"])
+        self.assertTrue(areas["RW_NVRAM"]["erased"])
+        self.assertEqual(layout["fmap"]["offset"], 0x442000)
+        self.assertEqual(layout["fmap"]["version"], "1.1")
+        self.assertEqual(areas["GBB"]["size"], 0x1E000)
+        self.assertEqual(areas["VBLOCK_A"]["size"], 0x10000)

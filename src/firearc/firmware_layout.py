@@ -32,22 +32,27 @@ BLOCK = 4096
 VARIABLE_STORE_AREA = "SMMSTORE"
 CBFS_AREA = "COREBOOT"
 FLASH_MAP_AREA = "FMAP"
+VBOOT_STATE_AREA = "RW_NVRAM"       # flash-backed vboot VBNV backup
+VBOOT_RO_AREA = "WP_RO"             # host-anchored write-protected subtree
+VBOOT_RW_SLOT_AREA = "RW_SECTION_A" # verified RW slot (VBLOCK_A + FW_MAIN_A)
+VBOOT_ROOT_KEY_AREA = "GBB"
+VBOOT_VBLOCK_AREA = "VBLOCK_A"
 
 ROLE_VARIABLE_STORE = "uefi-variable-store"
 ROLE_CBFS_CODE = "cbfs-code"
 ROLE_FLASH_MAP = "flash-map"
 ROLE_CONTAINER = "flash-image"
 ROLE_PRESERVED = "preserved"
+ROLE_VBOOT_STATE = "vboot-state"
+ROLE_VBOOT_ROOT = "vboot-root-key"
+ROLE_VBOOT_VBLOCK = "vboot-verification-block"
+ROLE_VBOOT_SLOT = "vboot-rw-slot"
+ROLE_VBOOT_RO = "vboot-protected-ro"
 
 # vboot names its flash regions GBB, VBLOCK_A/B and RO_*/RW_* sections; the
 # presence of any such region is a factual prerequisite for a protected-RO
 # firmware-verification model (and none exists in the pinned Q35 layout).
 VBOOT_AREA_PATTERN = re.compile(r"^(GBB|VBLOCK|RO_|RW_)")
-
-FIXED_ROLES = {VARIABLE_STORE_AREA: ROLE_VARIABLE_STORE,
-               FLASH_MAP_AREA: ROLE_FLASH_MAP,
-               CBFS_AREA: ROLE_CBFS_CODE}
-
 
 def parse_fmap(image):
     """Locate and parse the single structurally valid FMAP in a flash image.
@@ -120,85 +125,143 @@ def _area_name(image, position):
     return encoded.decode()
 
 
+def _children_of(areas, parent):
+    """Areas strictly inside `parent` and not inside any smaller container."""
+    inside = [a for a in areas
+              if a is not parent
+              and a["offset"] >= parent["offset"]
+              and a["offset"] + a["size"] <= parent["offset"] + parent["size"]]
+    # The immediate child set excludes areas nested inside other children.
+    immediate = []
+    for area in sorted(inside, key=lambda a: (a["size"], a["offset"]), reverse=True):
+        if not any(other is not area and area["offset"] >= other["offset"]
+                   and area["offset"] + area["size"] <= other["offset"] + other["size"]
+                   for other in immediate):
+            immediate.append(area)
+    return sorted(immediate, key=lambda a: a["offset"])
+
+
+def _check_disjoint(areas, label):
+    reach = 0
+    for area in sorted(areas, key=lambda a: a["offset"]):  # overlap-safe order
+        if area["offset"] < reach:
+            raise SafetyError(f"Overlapping flash areas at offset 0x{area['offset']:x} "
+                              f"({area['name']!r} under {label!r})")
+        reach = area["offset"] + area["size"]
+
+
 def classify(image, fmap):
     """Bind a parsed flash map to the region contract this harness relies on.
 
-    Requires exactly one guest-writable SMMSTORE variable store, one COREBOOT
-    CBFS code region and one FMAP descriptor, pairwise-disjoint child areas,
-    and records remaining facts (container area, gaps, vboot regions, per-area
+    The vboot layout (the pinned configuration since chain step 4) is one
+    SI_BIOS container with an RW side (verified slot, variable store, vboot
+    VBNV backup state, preserved VPD) and one WP_RO subtree carrying the FMAP
+    descriptor, GBB root key and recovery COREBOOT CBFS. Requires exactly one
+    of each contracted region in its expected place, disjoint at every level,
+    the SMMSTORE 64 KiB-aligned, and records remaining facts (gaps, per-area
     digests and pristine erase state) without inventing guarantees.
     """
     if fmap["size"] != len(image):
         raise SafetyError("Flash map does not describe the whole image")
     areas = [dict(area) for area in sorted(fmap["areas"], key=lambda a: (a["offset"], a["name"]))]
     containers = [area for area in areas if area["offset"] == 0 and area["size"] == len(image)]
-    if len(containers) > 1:
-        raise SafetyError("Ambiguous whole-flash container areas")
-    children = [area for area in areas if area not in containers]
-    named = [area["name"] for area in children]
-    for required in (VARIABLE_STORE_AREA, CBFS_AREA, FLASH_MAP_AREA):
-        if named.count(required) != 1:
+    if len(containers) != 1:
+        raise SafetyError("Flash map needs exactly one whole-flash container area")
+    container = containers[0]
+    top = _children_of(areas, container)
+    _check_disjoint(top, container["name"])
+    for required in (VARIABLE_STORE_AREA, VBOOT_STATE_AREA, VBOOT_RO_AREA,
+                     VBOOT_RW_SLOT_AREA):
+        if [a["name"] for a in top].count(required) != 1:
             raise SafetyError(f"Flash map must contain exactly one {required!r} area")
-    reach = 0
-    for area in children:  # sorted by offset: overlap detection is order-safe
-        if area["offset"] < reach:
-            raise SafetyError(f"Overlapping flash areas at offset 0x{area['offset']:x} "
-                              f"({area['name']!r})")
-        reach = area["offset"] + area["size"]
+    ro = next(a for a in top if a["name"] == VBOOT_RO_AREA)
+    ro_children = _children_of(areas, ro)
+    _check_disjoint(ro_children, ro["name"])
+    for required in (FLASH_MAP_AREA, CBFS_AREA, VBOOT_ROOT_KEY_AREA):
+        if [a["name"] for a in ro_children].count(required) != 1:
+            raise SafetyError(f"WP_RO must contain exactly one {required!r} area")
+    slot = next(a for a in top if a["name"] == VBOOT_RW_SLOT_AREA)
+    slot_children = _children_of(areas, slot)
+    _check_disjoint(slot_children, slot["name"])
+    for required in (VBOOT_VBLOCK_AREA, "FW_MAIN_A"):
+        if [a["name"] for a in slot_children].count(required) != 1:
+            raise SafetyError(f"RW_SECTION_A must contain exactly one {required!r} area")
+    variable_store = next(a for a in top if a["name"] == VARIABLE_STORE_AREA)
+    if variable_store["offset"] % 0x10000 or variable_store["size"] != 0x40000:
+        raise SafetyError("SMMSTORE must be 64 KiB aligned and 256 KiB large")
     gaps = []
     cursor = 0
-    for area in children:
+    for area in top:
         if area["offset"] > cursor:
             gaps.append({"offset": cursor, "size": area["offset"] - cursor})
         cursor = max(cursor, area["offset"] + area["size"])
     if cursor < len(image):
         gaps.append({"offset": cursor, "size": len(image) - cursor})
+    roles = {VARIABLE_STORE_AREA: ROLE_VARIABLE_STORE, CBFS_AREA: ROLE_CBFS_CODE,
+             FLASH_MAP_AREA: ROLE_FLASH_MAP, VBOOT_STATE_AREA: ROLE_VBOOT_STATE,
+             VBOOT_ROOT_KEY_AREA: ROLE_VBOOT_ROOT, VBOOT_VBLOCK_AREA: ROLE_VBOOT_VBLOCK,
+             VBOOT_RW_SLOT_AREA: ROLE_VBOOT_SLOT, VBOOT_RO_AREA: ROLE_VBOOT_RO,
+             container["name"]: ROLE_CONTAINER}
     inventory = []
     for area in areas:
         region = image[area["offset"]:area["offset"] + area["size"]]
-        area["role"] = ROLE_CONTAINER if area in containers else FIXED_ROLES.get(area["name"], ROLE_PRESERVED)
+        area["role"] = roles.get(area["name"], ROLE_PRESERVED)
         area["sha256"] = hashlib.sha256(region).hexdigest()
         area["erased"] = region == b"\xff" * area["size"]
         area["cbfs_file_marker"] = region[:8] == b"LARCHIVE"
         inventory.append(area)
-    variable_store = next(area for area in children if area["name"] == VARIABLE_STORE_AREA)
     return {
-        "schema": 1,
+        "schema": 2,
         "rom_bytes": len(image),
         "fmap": {"offset": fmap["offset"],
                  "version": f"{fmap['version_major']}.{fmap['version_minor']}",
                  "base": fmap["base"], "size": fmap["size"], "name": fmap["name"]},
         "areas": inventory,
-        "container_area": containers[0]["name"] if containers else None,
+        "container_area": container["name"],
+        "top_level_areas": [a["name"] for a in top],
+        "protected_ro_areas": [a["name"] for a in ro_children],
+        "rw_slot_areas": [a["name"] for a in slot_children],
         "child_gaps": gaps,
-        "vboot_regions": [area["name"] for area in children
+        "vboot_regions": [area["name"] for area in areas
                           if VBOOT_AREA_PATTERN.match(area["name"])],
-        "permitted_writable": [VARIABLE_STORE_AREA],
+        "permitted_writable": [VARIABLE_STORE_AREA, VBOOT_STATE_AREA],
         "boot_selection_state": "systemd-boot boot-selection state (default entry, "
                                 "timeout, try counters) is stored in UEFI variables, "
                                 "which this layout carries only in the SMMSTORE region; "
-                                "no separate boot-state flash region exists",
+                                "vboot try-count/result state rides in the RW_NVRAM "
+                                "flash-backed VBNV backup",
         "variable_store": {"name": variable_store["name"], "offset": variable_store["offset"],
                            "size": variable_store["size"],
                            "erased_in_pristine_image": variable_store["erased"]},
     }
 
 
-def write_confinement(pristine, booted, layout, *, permitted=VARIABLE_STORE_AREA):
-    """Verify a booted flash copy changed nothing outside the variable store.
+def write_confinement(pristine, booted, layout, *,
+                      permitted=(VARIABLE_STORE_AREA, VBOOT_STATE_AREA)):
+    """Verify a booted flash copy changed nothing outside the writable set.
 
-    Every mapped area other than `permitted`, plus every unmapped gap byte,
-    must be identical to the pristine image; violations fail closed with the
-    offending area and first differing offset.
+    Every mapped area other than the `permitted` set (UEFI variable store and
+    the flash-backed vboot VBNV backup by default), plus every unmapped gap
+    byte, must be identical to the pristine image; violations fail closed
+    with the offending area and first differing offset.
     """
     if len(pristine) != len(booted):
         raise SafetyError("Booted flash image size differs from the pristine ROM")
-    permitted_areas = [area for area in layout["areas"] if area["name"] == permitted]
-    if len(permitted_areas) != 1:
-        raise SafetyError(f"Expected exactly one permitted variable-store area {permitted!r}")
+    permitted = tuple(permitted)
+    for name in permitted:
+        if len([area for area in layout["areas"] if area["name"] == name]) != 1:
+            raise SafetyError(f"Expected exactly one permitted writable area {name!r}")
     changed, unchanged, digests = {}, [], {}
-    for area in layout["areas"]:
-        if area["role"] == ROLE_CONTAINER:
+    areas = layout["areas"]
+    aggregates = {area["name"] for area in areas
+                  if any(other is not area
+                         and other["offset"] >= area["offset"]
+                         and other["offset"] + other["size"] <= area["offset"] + area["size"]
+                         for other in areas)}
+    for area in areas:
+        # Aggregate areas (SI_BIOS, WP_RO, RW_SECTION_A) shadow their leaves;
+        # confinement compares leaf regions only.
+        if area["name"] in aggregates:
             continue
         start, size = area["offset"], area["size"]
         before, after = pristine[start:start + size], booted[start:start + size]
@@ -206,10 +269,10 @@ def write_confinement(pristine, booted, layout, *, permitted=VARIABLE_STORE_AREA
         if before == after:
             unchanged.append(area["name"])
             continue
-        if area["name"] != permitted:
+        if area["name"] not in permitted:
             first = next(index for index in range(size) if before[index] != after[index])
             raise SafetyError(f"Firmware flash area {area['name']!r} was modified outside "
-                              f"the permitted {permitted!r} variable store (first "
+                              f"the permitted writable set {permitted!r} (first "
                               f"difference at image offset 0x{start + first:x})")
         blocks = []
         byte_count = 0

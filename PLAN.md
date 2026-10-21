@@ -76,7 +76,7 @@ The enforced chain — reset to read-only root, nothing unsigned executing:
 | Link | Status |
 | --- | --- |
 | Pinned, reproducible firmware build (host-anchored per ADR 0005) | **done** — three byte-identical builds |
-| vboot protected-RO verification of mutable firmware/payload regions | remaining — investigated and feasible; needs board-layout change + signing keys |
+| vboot protected-RO verification of mutable firmware/payload regions | **dev-proven** (`just firmware-sign` + `just check-firmware-vboot`, ADR 0008: signed RW executes, tampered/attacker-key/unsigned-stock RW refused before payload execution; host-anchored, recovery payload still full EDK II) |
 | Signed slot-specific UKI with the verity authority embedded | **dev-signed done** — sb-signed, verified and content-checked; **enforced** (boots under `SecureBoot=1`, content tamper refused) |
 | FireArc Secure Boot: PK/KEK/db/dbx enrollment, `SecureBoot=1` | **implemented and enforced** (`just enroll` + `just check-secure-boot`, ADR 0007: PK/KEK/db + digest anchors + SecureBoot/SetupMode constructed offline into SMMSTORE; the signed chain boots, content tamper refused); dbx policy, cold-start persistence and variable-update refusal remain |
 | Signed systemd-boot (normal and fallback `BOOTX64.EFI` paths) | **dev-signed done and enforced** (ADR 0006 sb key, both ESP paths; tampered loader refused by the firmware) |
@@ -116,7 +116,21 @@ Critical path, in order:
    and unauthorized variable-update refusal remain open (Phase 2 item 13).
 4. **vboot adoption** per the investigation: custom fmd restoring SMMSTORE,
    flash-backed VBNV, futility-signed RW regions, wrong-key/modified RW
-   rejection before payload execution (Phase 2 item 6).
+   rejection before payload execution (Phase 2 item 6). **Done 2026-10-21**
+   (ADR 0008): the pinned firmware builds with `CONFIG_VBOOT` on the tracked
+   `q35-vboot.fmd` layout; `just vboot-keys` generates the dev vboot keyset
+   (root RSA-4096 / firmware data key RSA-2048, vb1 layout) under
+   `secrets/vboot/`; the `futility` stage builds the signing tool from the
+   pinned vboot sources; `just firmware-sign` signs the RW section and
+   installs our root key into the GBB (the coreboot build leaves upstream
+   test devkeys there — an empty root verifies trivially); `just
+   check-firmware-vboot` proves the contract: signed RW executes with no
+   recovery indication, tampered-RW (inside the signed body), attacker-keyed
+   RW and the no-recovery-payload variant are all refused before payload
+   execution, writes confined to SMMSTORE + RW_NVRAM. Honest scope: a
+   refused RW boots the RO recovery payload (the full EDK II) which Secure
+   Boot still gates; recovery-payload minimization is open; RO protection is
+   host-anchored (ADR 0005).
 5. **Requalify on the enforcing image**: layout classification, SMMSTORE
    write confinement, the three-discipline check-boot gate and device-profile
    identity continuity.
@@ -453,7 +467,7 @@ Check only steps supported by project code and recorded validation. A checked do
 3. [x] Inspect firmware layout and identify code, SMMSTORE, boot-selection state and preserved regions. Verify writes land only where intended in the baseline tests. Implemented by `just firmware-layout` (offline FMAP parse, role classification, archival) and enforced by `just check-boot`: both baseline boots must leave every flash byte outside the SMMSTORE variable store identical to the pristine ROM, and did (see `docs/validation/firmware-layout.md`). This records where writes land in QEMU; it is not flash write protection or authenticated-variable isolation.
 4. [ ] Separate the initial trusted-firmware laboratory profile from any firmware-verification profile. A detached signature checked by the launcher authenticates cold-start input; it is not guest-enforced verification on every reset.
 5. [x] Investigate the pinned Q35 coreboot vboot support for an emulator model of protected RO verification of mutable firmware/payload regions. Check FMAP capacity, SMMSTORE placement, TPM usage, recovery payload and boot-state compatibility before adopting it. Investigated 2026-10-20 (`docs/validation/firmware-vboot.md`): the board ships first-class vboot support (CONFIG_VBOOT, VBOOT_STARTS_IN_BOOTBLOCK, upstream `vboot-rwa-8M.fmd`/`vboot-rwab-8M.fmd` layouts for our 8 MiB flash). RW_A's 3.75 MiB FW_MAIN fits the 1.13 MiB payload; RW_AB is tight. The shipped layouts have no SMMSTORE (custom fmd required), VBNV must be flash-backed under QEMU (no persistent CMOS), the board's `drivers/pc80/tpm` MMIO TIS driver binds our swtpm for anti-rollback, and the recovery payload choice is open. Adoption therefore needs a board-layout change plus signing keys (blocked on the key-hierarchy decision); per ADR 0005 a QEMU vboot demo stays host-anchored.
-6. [ ] If that model is used, sign the firmware's actual verified regions using the correct vboot tooling; test modified/wrong-key payload rejection before payload execution. Merely signing a ROM file with a PE/UKI signing tool is not firmware verified boot.
+6. [ ] If that model is used, sign the firmware's actual verified regions using the correct vboot tooling; test modified/wrong-key payload rejection before payload execution. Merely signing a ROM file with a PE/UKI signing tool is not firmware verified boot. **Done 2026-10-21** (ADR 0008): the RW regions are signed with pinned-source futility and the dev vboot keyset (`firmware-sign` installs our GBB root); `check-firmware-vboot` proves modified-RW and wrong-key rejection before payload execution on QEMU with per-boot swtpm secdata. Host-anchored RO per ADR 0005; recovery-payload minimization and hardware WP remain open.
 7. [x] State exactly how the initial RO verifier is trusted/protected in QEMU. If host enforcement is the only anchor, retain that limitation and do not claim real hardware protection or resistance to a malicious host. ADR 0005 (`docs/decisions/0005-qemu-verifier-anchor.md`): the initial trusted-firmware input in QEMU is the host (the harness copies the pinned digest-verified ROM into writable pflash; nothing inside the machine verifies it first). The integrity boundary is the documented QEMU threat model — trusted host/QEMU/swtpm/harness, malicious guest content in scope, malicious host out of scope; identity-continuity assertions fail closed on host-side state changes but cannot prevent them. Firmware-verification claims stay blocked rather than implied by the OS gate; adopting a protected-RO model needs a board-layout change plus signing keys and its own qualification; on real hardware the physical flash protection supersedes this anchor.
 8. [x] Define separate development and production trust domains. Development credentials do not qualify production custody. ADR 0006: the development hierarchy authorizes nothing outside this development environment; production credentials require the item-10 ceremony and never derive from development keys.
 9. [x] Define distinct key roles: firmware authorization, UEFI PK, KEK, EFI-image signing/db, RAUC bundle signing, PCR-policy signing, recovery authorization and device CA/attestation identity. ADR 0006 defines every role slot; PK, KEK and EFI-image signing (db) are generated in the dev hierarchy now, the remaining roles are bound to their phases (vboot firmware authorization — item 6; RAUC — Phase 6; PCR policy — Phase 5; recovery — Phase 9; device CA/attestation — Phases 5/8).

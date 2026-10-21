@@ -324,7 +324,7 @@ def check_secure_boot(root, tools_label, uki_label, sign_label, device_label,
                        "xor": "content byte flips"},
             "store_survival": store_reports["good"],
             "flash_write_confinement": {
-                "permitted_region": firmware_layout.VARIABLE_STORE_AREA,
+                "permitted_regions": ["SMMSTORE", "RW_NVRAM"],
                 "runs": flash_runs,
                 "scope": "Observed write destinations only; QEMU pflash has no "
                          "hardware write protection"},

@@ -635,7 +635,7 @@ def check_boot(root, tools_label, device_label, firmware_label, label):
                          "evidence": firmware_source.name},
             "qemu_sha256": pins["sha256"],
             "flash_write_confinement": {
-                "permitted_region": firmware_layout.VARIABLE_STORE_AREA,
+                "permitted_regions": ["SMMSTORE", "RW_NVRAM"],
                 "runs": flash_runs,
                 "scope": "Observed write destinations only; QEMU pflash has no "
                          "hardware write protection"},

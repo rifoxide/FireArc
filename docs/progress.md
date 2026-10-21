@@ -178,6 +178,27 @@ qualification. The complete secured appliance is not yet implemented.
   whitespace-normalized serial (the console wraps `Acc\r\ness denied`
   mid-word — this cost three 15-minute timeouts), and QMP socket paths
   are length-guarded against the 108-byte UNIX limit.
+- **vboot protected-RW verification adopted and proven** (chain step 4;
+  PLAN Phase 2 items 5–6 annotated; ADR 0008): the firmware now builds with
+  `CONFIG_VBOOT` on the tracked `q35-vboot.fmd` (SMMSTORE restored 64
+  KiB-aligned, RW_NVRAM for flash-backed VBNV, FWID regions sized for the
+  real strings). New stages: `futility` (signing tool built from the pinned
+  vboot sources, offline), `vboot-keys` (dev keyset under secrets/vboot/:
+  root RSA-4096, firmware data key RSA-2048 — vboot's enum has no plain
+  RSA-3072), `firmware-sign` (signs RW, **installs our GBB root key** — the
+  coreboot build ships upstream test devkeys there and an empty root
+  verifies trivially), `check-firmware-vboot` (four sessions with per-boot
+  swtpm: signed RW executes with no recovery indication; tampered RW,
+  attacker-keyed RW and the no-recovery-payload variant refuse with no
+  guest code; writes confined to SMMSTORE + RW_NVRAM). The flash-layout
+  classifier was requalified for the nested vboot map (schema 2) and the
+  firmware-build now injects and pins the reviewed fmd. Two proof subtleties
+  recorded honestly: bytes beyond the vblock's signed body are unverified
+  free space (a tamper there is correctly accepted), and a refused RW boots
+  the RO recovery payload (full EDK II, still Secure Boot gated) rather
+  than halting — the no-recovery-payload session provides the dead-machine
+  form. Hardware/ODM transfer notes started at
+  `docs/hardware-odm-notes.md`.
 - Bounded evidence retention tightened (`just prune`): keeps only the
   state-referenced current generation plus device-profile-pinned
   provenance (was current + previous), build ids no longer truncate

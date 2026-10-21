@@ -77,6 +77,27 @@ def check_configuration(text, edk2_pin):
         raise SafetyError("Build configuration enables the declined dasharo-blobs bootsplash")
 
 
+def fmd_reference(text):
+    """The CONFIG_FMDFILE value, or None when the board default layout is used."""
+    match = re.search(r'^CONFIG_FMDFILE="([^"]+)"', text, re.MULTILINE)
+    return match.group(1) if match else None
+
+
+def check_fmd(name, text):
+    """A referenced flash layout must be a tracked file with the regions the
+    chain depends on: UEFI variable persistence (SMMSTORE) and, under vboot,
+    flash-backed VBNV (RW_NVRAM) and a protected RO region (WP_RO)."""
+    if name != Path(name).name or not name.endswith(".fmd"):
+        raise SafetyError(f"CONFIG_FMDFILE must name a tracked file, got {name!r}")
+    for region in ("SMMSTORE", "RW_NVRAM", "WP_RO", "FW_MAIN_A", "VBLOCK_A", "GBB"):
+        if not re.search(rf"\b{region}\b", text):
+            raise SafetyError(f"Flash layout {name} lacks the required {region} region")
+    if not re.search(r"\bSMMSTORE\s+0x40000\b", text):
+        raise SafetyError(f"Flash layout {name} must keep the qualified 256 KiB SMMSTORE")
+    if not re.search(r"\bFLASH@0x[0-9a-fA-F]+\s+0x800000\b", text):
+        raise SafetyError(f"Flash layout {name} must describe the 8 MiB image")
+
+
 def payload_description_files(workspace):
     """The payload DSC the build consumed and the FDF its FLASH_DEFINITION names."""
     dsc = regular_file(workspace, "DasharoPayloadPkg/DasharoPayloadPkg.dsc")
@@ -95,7 +116,16 @@ def build(root, sources_label, label, *, allow_network=False):
     validate_firmware_sources(lock)
     edk2_pin = {source["name"]: source["commit"] for source in lock["sources"]}["edk2"]
     configuration = regular_file(root, CONFIG_PATH)
-    check_configuration(configuration.read_text(), edk2_pin)
+    configuration_text = configuration.read_text()
+    check_configuration(configuration_text, edk2_pin)
+    layout = fmd_reference(configuration_text)
+    fmd = None
+    if layout is not None:
+        # The flash layout is a reviewed project input: track it beside the
+        # config, validate its regions, copy it into the tree at the exact
+        # path the configuration references, and pin its digest in evidence.
+        fmd = regular_file(root, (Path(CONFIG_PATH).parent / layout).as_posix())
+        check_fmd(layout, fmd.read_text())
     records = firmware.verify(root, sources_label)
     work = private_directory(Path(root) / "build/firmware-build", create=True) / label
     work.mkdir(mode=0o700)
@@ -111,6 +141,8 @@ def build(root, sources_label, label, *, allow_network=False):
     shutil.copytree(private_directory(Path(root) / "build/firmware") / sources_label / "sources" / "edk2",
                     workspace, symlinks=True)
     (tree / ".config").write_bytes(configuration.read_bytes())
+    if fmd is not None:
+        shutil.copyfile(fmd, tree / layout)
 
     logged(work, "make-olddefconfig", container_options(image, tree) + ["make", "olddefconfig"], timeout=1200)
     logged(work, "make", container_options(image, tree) + ["make", f"--jobs={os.cpu_count()}"],
@@ -156,6 +188,9 @@ def build(root, sources_label, label, *, allow_network=False):
                 "materialized": records["materialized"],
                 "sdk_image": lock["sdk_image"],
                 "configuration": {"path": CONFIG_PATH, "sha256": sha256(configuration)},
+                "flash_layout": ({"path": f"images/firmware/{layout}", "sha256": sha256(fmd)}
+                                 if fmd is not None else
+                                 {"note": "board default layout"}),
                 "expanded_configuration": {"bytes": expanded.stat().st_size,
                                            "sha256": sha256(expanded)},
                 "payload_description": {
@@ -166,7 +201,8 @@ def build(root, sources_label, label, *, allow_network=False):
                 },
                 "patches": {"applied": [],
                             "note": "Pinned upstream sources; the reviewed config "
-                                    "fragment is the only project input"},
+                                    "fragment (and flash layout file it names) are "
+                                    "the only project inputs"},
                 "build_commands": commands,
                 "board": "emulation/qemu-q35",
                 "coreboot.rom": {"sha256": sha256(output / "coreboot.rom"), "bytes": rom.stat().st_size},

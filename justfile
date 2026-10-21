@@ -87,6 +87,18 @@ prune *options:
 keys:
     python3 -B scripts/firearc.py keys
 
+# Generate (once) the development vboot keyset under gitignored secrets/vboot/.
+vboot-keys:
+    python3 -B scripts/firearc.py vboot-keys
+
+# Build the pinned vboot futility signing tool from the firmware sources.
+futility *options:
+    python3 -B scripts/firearc.py futility "$@"
+
+# Sign the vboot RW section of the built firmware with the dev vboot keyset.
+firmware-sign:
+    python3 -B scripts/firearc.py firmware-sign
+
 # Build the unsigned slot-A UKI from the frozen payloads (pinned ukify).
 uki *options:
     python3 -B scripts/firearc.py uki "$@"
@@ -110,6 +122,11 @@ device *options:
 # Boot the development disk in QEMU Q35 and assert the integrity gate outcome.
 check-boot *options:
     python3 -B scripts/firearc.py check-boot "$@"
+
+# Prove vboot protected-RW verification: signed RW executes, tampered and
+# attacker-keyed RW are refused before payload execution.
+check-firmware-vboot *options:
+    python3 -B scripts/firearc.py check-firmware-vboot "$@"
 
 # Prove Secure Boot enforcement on the enrolled firmware: signed chain boots,
 # tampered / modified / loader-tampered variants are refused, the store survives.

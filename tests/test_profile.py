@@ -145,10 +145,12 @@ class IdentityTests(unittest.TestCase):
         image = synthetic_image()
         layout = layout_of(image)
         import hashlib
-        expected = hashlib.sha256(image[0:0x8000]).hexdigest()
+        expected = hashlib.sha256(image[0x30000:0x70000]).hexdigest()
         self.assertEqual(profile.area_digest(image, layout, "SMMSTORE"), expected)
+        self.assertEqual(profile.area_digest(image, layout, "GBB"),
+                         hashlib.sha256(image[0x81800:0x83800]).hexdigest())
         with self.assertRaises(SafetyError):
-            profile.area_digest(image, layout, "GBB")
+            profile.area_digest(image, layout, "NOT_AN_AREA")
 
 
 class BootValidationTests(unittest.TestCase):

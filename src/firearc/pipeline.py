@@ -25,12 +25,15 @@ DEPENDENCIES = {
     "check-rootfs": ("tools", "rootfs"), "sbom": ("packages-root",),
     "firmware-sources": (),
     "firmware-build": ("firmware-sources",),
+    "futility": ("firmware-sources",),
+    "firmware-sign": ("tools", "firmware-build", "futility"),
     "firmware-layout": ("firmware-build",),
     "uki": ("tools", "root", "rootfs"),
     "sign": ("tools", "root", "uki"),
     "enroll": ("firmware-build", "sign"),
     "device": ("tools", "rootfs", "sign"), "check-boot": ("tools", "device", "firmware-build"),
     "check-secure-boot": ("tools", "uki", "sign", "device", "enroll"),
+    "check-firmware-vboot": ("tools", "firmware-sign", "device"),
 }
 
 
@@ -206,7 +209,17 @@ class Pipeline:
         # whole project digest; these list every input they actually read.
         "firmware-sources": ["locks/firmware-sources.json", "src/firearc/firmware.py", "src/firearc/inputs.py"],
         "firmware-build": ["locks/firmware-sources.json", "images/firmware/q35-coreboot.config",
+                           "images/firmware/q35-vboot.fmd",
                            "src/firearc/firmware.py", "src/firearc/inputs.py", "src/firearc/firmware_build.py"],
+        "futility": ["locks/firmware-sources.json", "src/firearc/firmware.py",
+                     "src/firearc/inputs.py", "src/firearc/futility.py"],
+        "firmware-sign": ["secrets/vboot/manifest.json",
+                          "secrets/vboot/root_key.vbpubk", "secrets/vboot/root_key.vbprivk",
+                          "secrets/vboot/firmware_data_key.vbprivk",
+                          "secrets/vboot/firmware_data_key.vbpubk",
+                          "secrets/vboot/kernel_subkey.vbpubk",
+                          "secrets/vboot/firmware.keyblock",
+                          "src/firearc/firmware_sign.py"],
         "firmware-layout": ["src/firearc/firmware_layout.py"],
         # The signing step and enrollment consume generated custody artifacts.
         # Their stage inputs are the exact files read, so regenerating the
@@ -293,6 +306,19 @@ class Pipeline:
         if stage == "firmware-build":
             firmware_build.build(root, deps["firmware-sources"]["id"], build_id, allow_network=self.online)
             return self.build / "firmware-build" / build_id, {}
+        if stage == "futility":
+            from . import futility as futility_stage
+            extra = futility_stage.build(root, deps["firmware-sources"]["id"], build_id,
+                                         allow_network=self.online)
+            return self.build / "firmware-build" / build_id, extra
+        if stage == "firmware-sign":
+            if not (self.root / "secrets/vboot/manifest.json").is_file():
+                raise SafetyError("Development vboot keyset absent; run just vboot-keys first")
+            from . import firmware_sign
+            extra = firmware_sign.build(root, deps["tools"]["id"],
+                                        deps["firmware-build"]["id"],
+                                        deps["futility"]["id"], build_id)
+            return self.build / "images" / build_id, extra
         if stage == "firmware-layout":
             firmware_layout.inspect(root, deps["firmware-build"]["id"], build_id)
             return self.build / "firmware-layout" / build_id, {}
@@ -313,6 +339,11 @@ class Pipeline:
             secureboot.check_secure_boot(root, deps["tools"]["id"], deps["uki"]["id"],
                                          deps["sign"]["id"], deps["device"]["id"],
                                          deps["enroll"]["id"], build_id)
+            return self.build / "images" / build_id, {}
+        if stage == "check-firmware-vboot":
+            from . import check_vboot
+            check_vboot.build(root, deps["tools"]["id"], deps["firmware-sign"]["id"],
+                              deps["device"]["id"], build_id)
             return self.build / "images" / build_id, {}
         if stage == "check-boot":
             device.check_boot(root, deps["tools"]["id"], deps["device"]["id"],
@@ -407,12 +438,15 @@ def run(root, command, *, online=False):
         elif command == "sbom": pipeline.ensure("sbom")
         elif command == "firmware-sources": pipeline.ensure("firmware-sources")
         elif command == "firmware-build": pipeline.ensure("firmware-build")
+        elif command == "futility": pipeline.ensure("futility")
+        elif command == "firmware-sign": pipeline.ensure("firmware-sign")
         elif command == "firmware-layout": pipeline.ensure("firmware-layout")
         elif command == "uki": pipeline.ensure("uki")
         elif command == "sign": pipeline.ensure("sign")
         elif command == "enroll": pipeline.ensure("enroll")
         elif command == "device": pipeline.ensure("device")
         elif command == "check-secure-boot": pipeline.ensure("check-secure-boot")
+        elif command == "check-firmware-vboot": pipeline.ensure("check-firmware-vboot")
         elif command == "check-boot": pipeline.ensure("check-boot")
         elif command == "check-initrd": pipeline.ensure("check-initrd")
         elif command == "check-rootfs": pipeline.ensure("check-rootfs")
