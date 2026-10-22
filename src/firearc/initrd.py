@@ -56,6 +56,18 @@ def audit(root, tools_label, source_label, label):
         listing = builder.logged(work, "listing", options + ["/audit/initrd.img"])
         if not re.search(r"^-rwxr-xr-x\s+[^\n]+ usr/lib/firearc/verify-root$", listing, re.MULTILINE):
             raise SafetyError("Root-gate entry point is not executable with the expected mode")
+        # Explicit TPM2 data tools (Phase 5 item 8): the enrollment and probe
+        # units need these exact files inside the initrd; their absence fails
+        # the audit before anything boots.
+        for required_file in (
+                "usr/bin/systemd-cryptenroll",
+                "usr/bin/systemd-cryptsetup",
+                "usr/sbin/cryptsetup",
+                "usr/lib/x86_64-linux-gnu/cryptsetup/libcryptsetup-token-systemd-tpm2.so",
+                "usr/bin/dd"):
+            if not re.search(r"^\S*\s+[^\n]+ " + re.escape(required_file) + r"$",
+                             listing, re.MULTILINE):
+                raise SafetyError("Initrd lacks the explicit data-unlock tool: " + required_file)
         installed = {"authority.sh": "usr/lib/firearc/authority.sh", "firearc-verify-root": "usr/lib/firearc/verify-root",
                      "firearc-verify-root.service": "etc/systemd/system/firearc-verify-root.service",
                      "sysroot.mount": "etc/systemd/system/sysroot.mount",

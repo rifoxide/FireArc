@@ -42,6 +42,9 @@ def main():
     boot.add_argument("--count", type=int, default=2)
     boot.add_argument("--tcg", action="store_true",
                       help="Force the TCG software-accelerated machine (KVM is the default profile)")
+    enroll = commands.add_parser("data-enroll",
+                                 help="One TPM2 enrollment session for a profile's data volume")
+    enroll.add_argument("--name", required=True)
     reboot = commands.add_parser("device-reboot",
                                  help="Warm-reset a running profile in one powered session")
     reboot.add_argument("--name", required=True)
@@ -96,6 +99,9 @@ def main():
         elif args.command == "device-boot":
             with pipeline.project_lock(ROOT):
                 result = profile.boot(ROOT, args.name, count=args.count, tcg=args.tcg)
+        elif args.command == "data-enroll":
+            with pipeline.project_lock(ROOT):
+                result = profile.data_enroll(ROOT, args.name)
         elif args.command == "device-reboot":
             with pipeline.project_lock(ROOT):
                 result = profile.reboot(ROOT, args.name, resets=args.resets)

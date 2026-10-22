@@ -15,6 +15,7 @@ the planning conversation. They are not claims of successful implementation.
 | [0008](0008-vboot-adoption.md) | Accepted | vboot protected-RW verification on the Q35 firmware: custom fmd, dev vboot keyset, `firmware-sign` and `check-firmware-vboot` |
 | [0009](0009-pcr-policy-key-and-phases.md) | Accepted | PCR-policy signing key under `secrets/pcr/`, `enter-initrd`-only phase set, four-way independent verification in the `pcr-sign` stage |
 | [0010](0010-per-device-luks2-data-volumes.md) | Accepted | Blank `FIREARC_DATA` in the factory image; per-device LUKS2 volumes born at provisioning; recovery credential under profile `secrets/`, escrow pending |
+| [0011](0011-guest-side-tpm2-enrollment.md) | Accepted | Guest-side TPM2 enrollment at `enter-initrd` (PCR 7 + signed PCR 11 via `/.extra`), one-shot credential transport, per-boot unlock probe with serial verdict |
 
 Implementation proposals in `PLAN.md` still require their stated feasibility and
 security gates; do not treat a proposal as a validated component contract.

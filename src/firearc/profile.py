@@ -30,14 +30,16 @@ import os
 from pathlib import Path
 import re
 import shutil
+import shlex
 import subprocess
+import sys
 import time
 import uuid
 
 from . import builder, device, firmware_layout, luks, pipeline
 from .inputs import load_lock
 from .integrity import (
-    SafetyError, private_directory, read_json, regular_file, sha256, verify_file,
+    SafetyError, ok_line, private_directory, read_json, regular_file, sha256, verify_file,
     write_json,
 )
 
@@ -107,6 +109,8 @@ def assert_identity_unchanged(expected, current, what):
 
 
 def provision(root, name, *, replace=False):
+    print(f"\u25b8 provisioning device '{name}'"
+          + (" (replacing existing state)" if replace else ""), file=sys.stderr, flush=True)
     """Explicitly create (or replace) a persistent device profile."""
     validate_name(name)
     pipe = pipeline.Pipeline(root, online=False)
@@ -196,10 +200,12 @@ def load(root, name):
         # must still match the provisioning evidence, and the recovery
         # credential must remain where the profile recorded it.
         if data.get("volume") != "luks2" or not data.get("uuid") \
-                or data.get("keyslots") != ["0"]:
+                or data.get("keyslots") not in (["0"], ["0", "1"]):
             raise SafetyError("Provisioned data volume does not match the "
                               "per-device LUKS2 provisioning contract")
-        if luks.region_digest(disk, luks.DATA_OFFSET) != data.get("region_sha256"):
+        if data.get("keyslots") == ["0", "1"] and not data.get("token"):
+            raise SafetyError("Enrolled data volume lacks its token record")
+        if not data.get("enroll_pending") and luks.region_digest(disk, luks.DATA_OFFSET) != data.get("region_sha256"):
             raise SafetyError("LUKS2 data volume region diverged from the "
                               "provisioning evidence; re-provision explicitly")
         credential = regular_file(target, data.get("recovery_credential", {}).get("path", ""))
@@ -275,10 +281,23 @@ def _assert_boot_markers(text, what):
     if not markers[device.REQUIRED_MARKER] or denial["denial"]:
         raise SafetyError(f"{what} did not reach the verified read-only sysroot "
                           f"terminal marker")
-    tpm_ok = device.TPM_TIS_MARKER in text and device.TPM_TIS_MISSING_MARKER not in text
+    tpm_ok = (device.TPM_TIS_MARKER in text
+              and device.TPM_TIS_MISSING_MARKER not in text)
     if not tpm_ok:
         raise SafetyError(f"{what} did not bind a TPM 2.0 device through ACPI/TIS "
                           f"(no {device.TPM_TIS_MARKER!r} marker)")
+    # The data-unlock probe must report a healthy outcome: an unattended
+    # TPM2 unlock, an as-yet-unenrolled volume, or a pre-data disk. Refusal
+    # or missing TPM/signature files is a failed session, never a pass.
+    healthy = (device.DATA_UNLOCK_OK_MARKER in text
+               or device.DATA_TOKEN_ABSENT_MARKER in text
+               or device.DATA_PROBE_NO_DISK_MARKER in text)
+    refused = (device.DATA_UNLOCK_REFUSED_MARKER in text
+               or device.DATA_PROBE_NO_TPM_MARKER in text
+               or device.DATA_PCRSIG_MISSING_MARKER in text)
+    if refused or not healthy:
+        raise SafetyError(f"{what} did not report a healthy data-unlock probe "
+                          f"outcome (refused={refused})")
     return markers, denial
 
 
@@ -293,7 +312,7 @@ class Machine:
     """
 
     def __init__(self, run_dir, qemu, swtpm, flash, disk, tpm_dir, serial, *,
-                 kvm, rebootable=False, timeout=VM_TIMEOUT):
+                 kvm, rebootable=False, timeout=VM_TIMEOUT, enroll_disk=None):
         self.run_dir = run_dir
         self.qemu = qemu
         self.swtpm = swtpm
@@ -304,6 +323,7 @@ class Machine:
         self.kvm = kvm
         self.rebootable = rebootable
         self.timeout = timeout
+        self.enroll_disk = enroll_disk
         self.process = None
         self.session = None
         self.cut = False
@@ -316,6 +336,8 @@ class Machine:
         command = [self.swtpm, "socket", "--tpm2", "--tpmstate", f"dir={self.tpm_dir}",
                    "--ctrl", f"type=unixio,path={control}",
                    "--log", f"file={log}", "--terminate"]
+        print(f"  \u25b8 swtpm: starting (state: {self.tpm_dir.parent.name}/{self.tpm_dir.name})\n"
+              f"    $ {shlex.join(command)}", file=sys.stderr, flush=True)
         self.process = subprocess.Popen(command, stdout=self._stderr,
                                         stderr=subprocess.STDOUT,
                                         preexec_fn=device.die_with_parent)
@@ -332,7 +354,8 @@ class Machine:
             self.session = device.start_vm(
                 self.run_dir, "qemu-boot", flash=self.flash, disk=self.disk,
                 serial=self.serial, kvm=self.kvm, tpm=control,
-                rebootable=self.rebootable, timeout=self.timeout)
+                rebootable=self.rebootable, timeout=self.timeout,
+                enroll_disk=self.enroll_disk)
         except BaseException:
             self._stop_swtpm()
             raise
@@ -436,6 +459,184 @@ def _record_failure(prepared, run_dir, op, error, session, session_ran):
     save_json(prepared["target"] / "profile.json", profile)
 
 
+def data_enroll(root, name):
+    print(f"\u25b8 data-enroll '{name}': one TPM2 enrollment boot (PCR 7 + signed PCR 11)",
+          file=sys.stderr, flush=True)
+    """One enrollment session: boot with the one-shot credential transport
+    attached, let the guest enroll the TPM2 token against the live PCR
+    state (PCR 7 + the signed PCR 11 policy), validate the in-boot unlock,
+    then verify the on-disk token against our PCR-policy key host-side.
+
+    The session is a real powered-on boot (flash/TPM identity advance), and
+    the LUKS2 header legitimately changes: keyslot 1 + the systemd-tpm2
+    token. Both are recorded, so later boots assert continuity from the
+    post-enrollment state.
+    """
+    prepared = _prepare(root, name)
+    profile = prepared["profile"]
+    data = profile.get("data")
+    if not data:
+        raise SafetyError("Profile has no provisioned data volume; run "
+                          "device-provision first")
+    if data.get("keyslots") != ["0"]:
+        raise SafetyError("Data volume is already TPM-enrolled; re-enrollment "
+                          "is an explicit re-provision")
+    _assert_session_started_from_expected_state(prepared)
+    credential = regular_file(prepared["target"], "secrets/recovery.key")
+    if hashlib.sha256(credential.read_bytes()).hexdigest() \
+            != data["recovery_credential"]["sha256"]:
+        raise SafetyError("Recovery credential does not match its recorded digest")
+    policy_pem, policy_pkfp = luks.expected_pcr_policy(root)
+    # An interrupted enrollment session may have written the token to the
+    # volume without the profile being updated. Fail closed — but with a
+    # validated adoption, so the operator can recover without destroying
+    # the device: the token must satisfy the full host-side contract.
+    with open(prepared["disk"], "rb") as handle:
+        handle.seek(luks.DATA_OFFSET)
+        current_header = luks.parse_header_json(handle.read(luks.HEADER_READ_BYTES))
+    if data.get("keyslots") == ["0"] and current_header.get("tokens"):
+        token = luks.validate_enrolled(current_header, expected_pem=policy_pem)
+        data["keyslots"] = ["0", "1"]
+        data["region_sha256"] = luks.region_digest(prepared["disk"], luks.DATA_OFFSET)
+        data["token"] = {"type": luks.TOKEN_TYPE, "pcrs_plain": ["7"],
+                         "pcrs_signed": ["11"], "policy_pkfp": policy_pkfp,
+                         "adopted_after_interrupt": True}
+        data.pop("enroll_pending", None)
+        record_operation(profile, "data-enroll-adopt", interrupted=True)
+        save_json(prepared["target"] / "profile.json", profile)
+        raise SafetyError("Found an enrolled volume from an interrupted session; "
+                          "the profile has adopted the validated token — re-run "
+                          "data-enroll or boot to validate the unlock")
+    # Transaction marker: an interrupted session may leave the volume
+    # enrolled while the profile still records the pre-enrollment state;
+    # with this flag set, load() tolerates the divergence and the adoption
+    # path above is the only way to clear it.
+    data["enroll_pending"] = True
+    save_json(prepared["target"] / "profile.json", profile)
+    kvm = os.access("/dev/kvm", os.R_OK | os.W_OK)
+    run_dir = next_run(prepared["runs_dir"])
+    run_dir.mkdir(mode=0o700)
+    enroll_disk = run_dir / "enroll-key.img"
+    luks.build_enroll_disk(enroll_disk, credential.read_bytes())
+    serial = run_dir / "serial.log"
+    machine = Machine(run_dir, prepared["qemu"], prepared["swtpm"], prepared["flash"],
+                      prepared["disk"], prepared["tpm_dir"], serial, kvm=kvm,
+                      timeout=VM_TIMEOUT, enroll_disk=enroll_disk)
+    session_ran = False
+    try:
+        with machine:
+            session_ran = True
+            machine.session.wait_until(
+                lambda text: device.DATA_ENROLL_OK_MARKER in text
+                or device.DATA_ENROLL_FAIL_MARKER in text
+                or device.DATA_ENROLL_ALREADY_MARKER in text
+                or device.DATA_ENROLL_NO_PCRSIG_MARKER in text
+                or device.DATA_ENROLL_DISK_ABSENT_MARKER in text)
+            # Give the probe unit (ordered after enrollment) its turn to
+            # validate the fresh token with a real unattended unlock.
+            machine.session.wait_until(
+                lambda text: device.DATA_UNLOCK_OK_MARKER in text
+                or device.DATA_UNLOCK_REFUSED_MARKER in text
+                or device.DATA_TOKEN_ABSENT_MARKER in text)
+            try:
+                machine.session.wait_until(
+                    lambda text: "FIREARC_PCR_DUMP_END" in text)
+            except SafetyError:
+                pass
+            machine.session.quit()
+            text = serial.read_text(errors="replace")
+    except Exception as error:
+        _record_failure(prepared, run_dir, "data-enroll", error,
+                        machine.session, session_ran)
+        raise
+    finally:
+        # The one-shot transport never outlives its session.
+        luks.scrub(enroll_disk)
+    try:
+        for refused in (device.DATA_ENROLL_FAIL_MARKER, device.DATA_ENROLL_ALREADY_MARKER,
+                        device.DATA_ENROLL_NO_PCRSIG_MARKER,
+                        device.DATA_ENROLL_DISK_ABSENT_MARKER,
+                        device.DATA_UNLOCK_REFUSED_MARKER,
+                        device.DATA_TOKEN_ABSENT_MARKER,
+                        device.DATA_PROBE_NO_TPM_MARKER, device.DATA_PCRSIG_MISSING_MARKER):
+            if refused in text:
+                raise SafetyError(f"Enrollment session reported {refused!r}; "
+                                  f"inspect {run_dir}")
+        if device.DATA_ENROLL_OK_MARKER not in text or device.DATA_UNLOCK_OK_MARKER not in text:
+            raise SafetyError(f"Enrollment session lacked its OK markers; inspect {run_dir}")
+        _assert_boot_markers(text, "Enrollment boot")
+        # Host-side verification of the mutated header: keyslot 1 + exactly one
+        # systemd-tpm2 token covering PCR 7 and the signed PCR 11 policy, under
+        # our PCR-policy public key, spliced exactly once into the data region.
+        with open(prepared["disk"], "rb") as handle:
+            handle.seek(luks.DATA_OFFSET)
+            on_disk = handle.read(luks.HEADER_READ_BYTES)
+        header = luks.parse_header_json(on_disk)
+        luks.assert_binary_identity(on_disk, uuid=data["uuid"])
+        token = luks.validate_enrolled(header, expected_pem=policy_pem)
+        new_region = luks.region_digest(prepared["disk"], luks.DATA_OFFSET)
+        if new_region == data["region_sha256"]:
+            raise SafetyError("Enrollment boot did not change the data region")
+        record = {
+            "op": "data-enroll", "run": int(run_dir.name), "passed": True,
+            "kvm": kvm, "policy_pkfp": policy_pkfp,
+            "token": {"type": token["type"],
+                      "pcrs_plain": sorted(str(v) for v in token.get("tpm2-pcrs", [])),
+                      "pcrs_signed": sorted(str(v) for v in token.get("tpm2_pubkey_pcrs", [])),
+                      "keyslot": token.get("keyslots")},
+            "region_sha256_before": data["region_sha256"],
+            "scope": _session_scope("TPM2 enrollment of the data volume "
+                                    "(PCR 7 + signed PCR 11 policy)"),
+        }
+        _finish_session(prepared, run_dir, text, record, machine.session)
+    except Exception as error:
+        # The machine already ran and advanced identity (flash/TPM, and
+        # possibly the volume); a failed post-session validation must still
+        # record that observed state honestly, never leave the profile
+        # asserting a pre-session baseline that no longer exists.
+        record = {"op": "data-enroll", "run": int(run_dir.name), "passed": False,
+                  "error": str(error)[:500],
+                  "smmstore_sha256_after": area_digest(
+                      prepared["flash"].read_bytes(), prepared["layout"],
+                      firmware_layout.VARIABLE_STORE_AREA),
+                  "tpm_sha256_after": tpm_digests(prepared["tpm_dir"]),
+                  "data_sha256_after": luks.region_digest(prepared["disk"], luks.DATA_OFFSET),
+                  "scope": "Failed enrollment session; observed state adopted as "
+                           "the new baseline (enroll_pending remains set)"}
+        save_json(run_dir / "run.json", record)
+        profile["boots"] = profile.get("boots", 0) + 1
+        profile["state_after_last_boot"] = {
+            "smmstore_sha256": record["smmstore_sha256_after"],
+            "tpm_sha256": record["tpm_sha256_after"],
+            "data_sha256": record["data_sha256_after"]}
+        record_operation(profile, "data-enroll", run=int(run_dir.name), failed=True,
+                         error=str(error)[:200])
+        profile["last_error"] = str(error)
+        save_json(prepared["target"] / "profile.json", profile)
+        raise
+    data["keyslots"] = ["0", "1"]
+    data["region_sha256"] = new_region
+    data["token"] = {"type": luks.TOKEN_TYPE, "pcrs_plain": ["7"],
+                     "pcrs_signed": ["11"], "policy_pkfp": policy_pkfp,
+                     "enrolled_run": int(run_dir.name)}
+    data.pop("enroll_pending", None)
+    data["recovery_credential"]["transport"] = ("one-shot enroll disk (item 8); "
+                                                 "file only; never in argv, serial or logs")
+    profile["boots"] = profile.get("boots", 0) + 1
+    profile["state_after_last_boot"] = {
+        "smmstore_sha256": record["smmstore_sha256_after"],
+        "tpm_sha256": record["tpm_sha256_after"],
+        "data_sha256": record["data_sha256_after"]}
+    record_operation(profile, "data-enroll", run=int(run_dir.name), passed=True)
+    save_json(prepared["target"] / "profile.json", profile)
+    write_json(run_dir / "run.json", record)
+    return {"passed": True, "name": name, "run": int(run_dir.name),
+            "token": data["token"], "policy_pkfp": policy_pkfp,
+            "region_sha256": new_region, "evidence": str(run_dir),
+            "scope": "TPM2 token enrolled against the live boot state and "
+                     "validated by an unattended in-boot unlock"}
+
+
 def boot(root, name, *, count=2, tcg=False):
     """Cold-start the persistent profile; verify boot, writes and identity.
 
@@ -468,6 +669,9 @@ def boot(root, name, *, count=2, tcg=False):
                 assert_identity_unchanged(records[-1]["tpm_sha256_after"], tpm_before,
                                           "TPM state")
             serial = run_dir / "serial.log"
+            print(f"  \u25b8 cold boot {offset + 1}/{count} (run {number}, "
+                  f"{run_dir.parent.parent.name}/{run_dir.name})", file=sys.stderr, flush=True)
+            boot_started = time.monotonic()
             machine = Machine(run_dir, prepared["qemu"], prepared["swtpm"], flash,
                               prepared["disk"], tpm_dir, serial, kvm=kvm,
                               timeout=timeout)
@@ -487,6 +691,18 @@ def boot(root, name, *, count=2, tcg=False):
                                 lambda text: "FIREARC_PCR_DUMP_END" in text)
                         except SafetyError:
                             pass
+                    # The data-unlock probe's verdict is part of every boot's
+                    # contract (a bounded TPM2 attach may legitimately take
+                    # longer than the boot markers); wait for it before
+                    # quitting so refusal is always captured, never missed
+                    # by quitting too early.
+                    machine.session.wait_until(
+                        lambda text: (device.DATA_UNLOCK_OK_MARKER in text
+                                      or device.DATA_UNLOCK_REFUSED_MARKER in text
+                                      or device.DATA_TOKEN_ABSENT_MARKER in text
+                                      or device.DATA_PROBE_NO_DISK_MARKER in text
+                                      or device.DATA_PROBE_NO_TPM_MARKER in text
+                                      or device.DATA_PCRSIG_MISSING_MARKER in text))
                     machine.session.quit()
                     text = serial.read_text(errors="replace")
             except Exception as error:
@@ -518,6 +734,8 @@ def boot(root, name, *, count=2, tcg=False):
             record_operation(profile, "boot", run=number)
             save_json(prepared["target"] / "profile.json", profile)
             write_json(run_dir / "run.json", record)
+            print(ok_line(f"  \u2713 cold boot {number} passed ({time.monotonic() - boot_started:.0f}s)"),
+                  file=sys.stderr, flush=True)
     except Exception as error:
         profile["last_error"] = str(error)
         save_json(prepared["target"] / "profile.json", profile)
@@ -560,6 +778,7 @@ def reboot(root, name, *, resets=2):
             session = machine.session
             text = ""
             for cycle in range(resets + 1):
+                print(f"  \u25b8 warm reset cycle {cycle}/{resets}", file=sys.stderr, flush=True)
                 # The dev unit prints the terminal marker twice per boot.
                 needed = 2 * (cycle + 1)
                 text = session.wait_until(
@@ -612,6 +831,7 @@ def reboot(root, name, *, resets=2):
 
 
 def stop(root, name):
+    print(f"\u25b8 device-stop '{name}': boot to marker, then QMP powerdown", file=sys.stderr, flush=True)
     """Boot to the verified marker, then stop the machine via QMP powerdown.
 
     The power-down request is the ACPI power button; whether the appliance
@@ -684,6 +904,7 @@ def stop(root, name):
 
 
 def powercut(root, name):
+    print(f"\u25b8 device-powercut '{name}': verified boot, then hard kill", file=sys.stderr, flush=True)
     """Cut power mid-session: SIGKILL QEMU and swtpm after a verified boot.
 
     The cut is abrupt by design (no TPM2_Shutdown, no variable-store flush);
@@ -762,6 +983,7 @@ def powercut(root, name):
 
 
 def snapshot(root, name, label):
+    print(f"\u25b8 device-snapshot '{name}' -> '{label}'", file=sys.stderr, flush=True)
     """Explicitly copy the whole persistent device state into a named snapshot."""
     validate_name(label)
     target, profile = load(root, name)
@@ -800,6 +1022,7 @@ def snapshot(root, name, label):
 
 
 def restore(root, name, label):
+    print(f"\u25b8 device-restore '{name}' <- '{label}'", file=sys.stderr, flush=True)
     """Explicitly restore persistent device state from a named snapshot.
 
     This is the only state-restoration path, and it is always operator

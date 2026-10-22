@@ -57,6 +57,9 @@ device-provision *options:
 device-boot *options:
     python3 -B scripts/firearc.py device-boot "$@"
 
+data-enroll *options:
+    python3 -B scripts/firearc.py data-enroll "$@"
+
 # Warm-reset a running machine in place (one QEMU+swtpm session, flash and TPM
 # stay powered through every reset); ends on a full verified boot.
 device-reboot *options:

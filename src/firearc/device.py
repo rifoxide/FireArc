@@ -23,12 +23,16 @@ import os
 from pathlib import Path
 import re
 import shutil
+import shlex
 import subprocess
+import sys
+import time
 import time
 
 from . import builder, firmware_layout, qmp, rootfs
 from .inputs import load_lock
 from .integrity import (
+    fail_line, ok_line,
     SafetyError, identifier, private_directory, read_json, regular_file, sha256,
     verify_file, write_json,
 )
@@ -133,6 +137,65 @@ ExecStart=/bin/sh -c 'echo FIREARC_TPM_DEBUG_CLASS=$(ls /sys/class 2>/dev/null |
 
 LOADER_CONF = "timeout 0\ndefault firearc-a\neditor no\n"
 
+# Console contract for the TPM2 data volume (Phase 5 item 8+). The probe
+# runs at every boot after the enter-initrd phase: with an enrolled token it
+# attempts the unattended TPM2 unlock (and detaches again — the sealed region
+# is identity, never scratch), and reports refusal honestly. The enrollment
+# unit runs only when its one-shot transport disk is attached.
+DATA_UNLOCK_OK_MARKER = "FIREARC_DATA_UNLOCK_OK"
+DATA_UNLOCK_REFUSED_MARKER = "FIREARC_DATA_UNLOCK_REFUSED"
+DATA_TOKEN_ABSENT_MARKER = "FIREARC_DATA_TOKEN_ABSENT"
+DATA_PROBE_NO_DISK_MARKER = "FIREARC_DATA_PROBE_NO_DISK"
+DATA_PROBE_NO_TPM_MARKER = "FIREARC_DATA_PROBE_NO_TPM"
+DATA_PCRSIG_MISSING_MARKER = "FIREARC_DATA_PCRSIG_MISSING"
+DATA_ENROLL_OK_MARKER = "FIREARC_DATA_ENROLL_OK"
+DATA_ENROLL_FAIL_MARKER = "FIREARC_DATA_ENROLL_FAIL"
+DATA_ENROLL_ALREADY_MARKER = "FIREARC_DATA_ENROLL_ALREADY"
+DATA_ENROLL_DISK_ABSENT_MARKER = "FIREARC_ENROLL_DISK_ABSENT"
+DATA_ENROLL_NO_PCRSIG_MARKER = "FIREARC_DATA_ENROLL_NO_PCRSIG"
+
+# The unlock probe: explicit, never an automatic crypttab path. Ordering
+# encodes the PLAN item 10 rule ahead of its time: unlock attempts happen
+# only after the root integrity gate (sysroot.mount) and the enter-initrd
+# PCR phase the signed policy pins. systemd-stub 257 exposes the UKI's
+# .pcrsig/.pcrpkey sections in the initrd under /.extra/ (v254+ layout).
+DATA_PROBE_UNIT = """[Unit]
+Description=FireArc development TPM2 data-unlock probe
+DefaultDependencies=no
+After=systemd-pcrphase-initrd.service firearc-data-enroll.service
+After=sysroot.mount
+Before=initrd.target
+
+[Service]
+Type=oneshot
+StandardInput=null
+StandardOutput=journal+console
+StandardError=journal+console
+ExecStart=/bin/sh -c 'i=0; while [ ! -e /dev/disk/by-partlabel/FIREARC_DATA ] && [ $i -lt 150 ]; do sleep 0.2; i=$((i+1)); done; if [ ! -e /dev/disk/by-partlabel/FIREARC_DATA ]; then echo FIREARC_DATA_PROBE_NO_DISK > /dev/console; elif [ ! -e /dev/tpmrm0 ]; then echo FIREARC_DATA_PROBE_NO_TPM > /dev/console; elif [ ! -e /.extra/tpm2-pcr-signature.json ] || [ ! -e /.extra/tpm2-pcr-public-key.pem ]; then echo FIREARC_DATA_PCRSIG_MISSING > /dev/console; else cryptsetup luksDump --dump-json-metadata /dev/disk/by-partlabel/FIREARC_DATA > /run/data-header.json 2>/run/data-header.err; echo FIREARC_PROBE_LUKSDUMP_RC=$? > /dev/console; echo FIREARC_PROBE_LUKSDUMP_TOKENS=$(grep -c systemd-tpm2 /run/data-header.json) > /dev/console; grep -q systemd-tpm2 /run/data-header.json; if [ $? -eq 0 ]; then if timeout 120 systemd-cryptsetup attach firearc-data /dev/disk/by-partlabel/FIREARC_DATA - tpm2-device=auto > /dev/console 2>&1; then echo FIREARC_DATA_UNLOCK_OK > /dev/console; systemd-cryptsetup detach firearc-data > /dev/console 2>&1; else echo FIREARC_DATA_UNLOCK_REFUSED > /dev/console; fi; else echo FIREARC_DATA_TOKEN_ABSENT > /dev/console; fi; fi'
+"""
+
+# One-shot TPM2 enrollment: gated on the presence of the enrollment
+# transport (the FIREARC-ENROLL-KEY magic on /dev/sdb), unlocked with the
+# recovery credential read from that disk, and enrolled with explicit PCR 7
+# binding plus the signed PCR 11 policy the UKI carries (.pcrsig/.pcrpkey
+# exposed by systemd-stub under /.extra/, v254+ layout). The credential file
+# is overwritten and removed immediately after use; serial output never
+# contains it.
+DATA_ENROLL_UNIT = """[Unit]
+Description=FireArc development TPM2 data enrollment
+DefaultDependencies=no
+After=systemd-pcrphase-initrd.service
+After=sysroot.mount
+Before=initrd.target
+
+[Service]
+Type=oneshot
+StandardInput=null
+StandardOutput=journal+console
+StandardError=journal+console
+ExecStart=/bin/sh -c 'if [ "$(dd if=/dev/sdb bs=32 count=1 2>/dev/null)" != "FIREARC-ENROLL-KEY-V1" ]; then echo FIREARC_ENROLL_DISK_ABSENT > /dev/console; elif [ ! -e /dev/tpmrm0 ]; then echo FIREARC_DATA_ENROLL_FAIL > /dev/console; elif cryptsetup luksDump --dump-json-metadata /dev/disk/by-partlabel/FIREARC_DATA 2>/dev/null | grep -q systemd-tpm2; then echo FIREARC_DATA_ENROLL_ALREADY > /dev/console; elif [ ! -e /.extra/tpm2-pcr-signature.json ] || [ ! -e /.extra/tpm2-pcr-public-key.pem ]; then echo FIREARC_DATA_ENROLL_NO_PCRSIG > /dev/console; else dd if=/dev/sdb of=/run/firearc-recovery.key bs=32 skip=1 count=1 2>/dev/null; chmod 600 /run/firearc-recovery.key; tpm2_pcrread sha256:7,11 > /dev/console 2>&1; if timeout 120 systemd-cryptenroll --tpm2-device=/dev/tpmrm0 --tpm2-pcrs=7 --tpm2-public-key=/.extra/tpm2-pcr-public-key.pem --tpm2-public-key-pcrs=11 --tpm2-signature=/.extra/tpm2-pcr-signature.json --unlock-key-file=/run/firearc-recovery.key /dev/disk/by-partlabel/FIREARC_DATA > /dev/console 2>&1; then echo FIREARC_DATA_ENROLL_OK > /dev/console; else echo FIREARC_DATA_ENROLL_FAIL > /dev/console; fi; dd if=/dev/urandom of=/run/firearc-recovery.key bs=32 count=1 2>/dev/null; rm -f /run/firearc-recovery.key; fi'
+"""
+
 # With one UKI under EFI/Linux and timeout 0, systemd-boot boots the single
 # type-2 entry automatically; the entry's kernel command line comes from the
 # UKI's embedded .cmdline section, not from a loader entry file.
@@ -192,12 +255,29 @@ def dev_cpio(authority):
         ("etc/systemd", 0o040755, b""),
         ("etc/systemd/system", 0o040755, b""),
         ("etc/systemd/system/firearc-dev-done.service", 0o0100644, DEV_UNIT.encode()),
+        # TPM2 data volume units (Phase 5 item 8+): the probe runs at every
+        # boot, the enrollment unit only when its transport disk is present.
+        # The probe is required (its marker is part of the boot contract);
+        # the enrollment unit is conditional tooling that exits immediately
+        # when the transport is absent.
+        ("etc/systemd/system/firearc-data-probe.service", 0o0100644,
+         DATA_PROBE_UNIT.encode()),
+        ("etc/systemd/system/firearc-data-enroll.service", 0o0100644,
+         DATA_ENROLL_UNIT.encode()),
         # requires (not wants): initrd.target — and therefore switch_root —
         # waits for the dev unit, keeping the machine in the initrd for the
         # runtime verity read.
         ("etc/systemd/system/initrd.target.requires", 0o040755, b""),
         ("etc/systemd/system/initrd.target.requires/firearc-dev-done.service",
          0o0120777, b"../firearc-dev-done.service"),
+        ("etc/systemd/system/initrd.target.requires/firearc-data-probe.service",
+         0o0120777, b"../firearc-data-probe.service"),
+        # The enrollment unit runs on every boot too, but exits immediately
+        # (with an explicit serial marker) when its one-shot transport disk
+        # is absent; keeping it required means a machine with an attached
+        # transport can never skip it.
+        ("etc/systemd/system/initrd.target.requires/firearc-data-enroll.service",
+         0o0120777, b"../firearc-data-enroll.service"),
     ])
 
 
@@ -229,7 +309,8 @@ def sfdisk_script():
     return "\n".join(lines) + "\n"
 
 
-def qemu_command(firmware, disk, serial, *, kvm, tpm=None, qmp_socket=None, rebootable=False):
+def qemu_command(firmware, disk, serial, *, kvm, tpm=None, qmp_socket=None, rebootable=False,
+                 enroll_disk=None):
     # The payload has no virtio drivers: the development disk is presented
     # over the emulated ICH9 AHCI controller the payload does support.
     command = ["qemu-system-x86_64", "-machine", "q35", "-accel", "kvm" if kvm else "tcg",
@@ -250,6 +331,14 @@ def qemu_command(firmware, disk, serial, *, kvm, tpm=None, qmp_socket=None, rebo
         "-device", "ahci,id=ahci0",
         "-drive", f"if=none,id=disk0,file={disk},format=raw",
         "-device", "ide-hd,drive=disk0,bus=ahci0.0"]
+    if enroll_disk:
+        # One-shot enrollment transport (Phase 5 item 8): a raw image whose
+        # first 32 bytes carry the FIREARC-ENROLL-KEY magic and whose next
+        # 32 bytes carry the recovery credential. Guest-visible as /dev/sdb
+        # (second port of the same AHCI bus); attached only for the single
+        # enrollment session, never for ordinary boots.
+        command += ["-drive", f"if=none,id=enroll0,file={enroll_disk},format=raw",
+                    "-device", "ide-hd,drive=enroll0,bus=ahci0.1"]
     if tpm:
         # Exactly one emulated TPM per machine, over the ISA TIS interface,
         # backed by the device profile's isolated swtpm control socket.
@@ -285,6 +374,10 @@ class VmSession:
     def start(self, serial_path):
         write_json(self.work / (self.name + ".command.json"), self.command)
         self.serial_path = serial_path
+        accel = "kvm" if "kvm" in self.command else "tcg"
+        print(f"  \u25b8 {self.name}: QEMU booting ({accel}), serial -> {serial_path.parent.name}/{serial_path.name}\n"
+              f"    $ {shlex.join(self.command)}", file=sys.stderr, flush=True)
+        self.started = time.monotonic()
         self._out = (self.work / (self.name + ".stdout")).open("xb")
         self._err = (self.work / (self.name + ".stderr")).open("xb")
         self.process = subprocess.Popen(self.command, stdin=subprocess.DEVNULL,
@@ -391,9 +484,16 @@ class VmSession:
         except subprocess.TimeoutExpired as error:
             self.process.kill()
             self.process.wait(timeout=30)
+            print(fail_line(f"  \u2717 {self.name}: killed after not exiting within {timeout}s"), file=sys.stderr, flush=True)
             raise SafetyError(f"QEMU session {self.name} did not exit within "
                               f"{timeout}s") from error
-        return self.process.returncode
+        elapsed = time.monotonic() - getattr(self, "started", time.monotonic())
+        code = self.process.returncode
+        if code == 0:
+            print(ok_line(f"  \u2713 {self.name}: QEMU exited cleanly ({elapsed:.0f}s)"), file=sys.stderr, flush=True)
+        else:
+            print(f"  \u25b8 {self.name}: QEMU left with rc={code} ({elapsed:.0f}s)", file=sys.stderr, flush=True)
+        return code
 
     def close(self):
         """Finalize evidence; safe once the process has left."""
@@ -412,7 +512,7 @@ class VmSession:
 
 
 def start_vm(work, name, *, flash, disk, serial, kvm, tpm=None, rebootable=False,
-             timeout=1800):
+             timeout=1800, enroll_disk=None):
     """Start one QEMU machine under QMP control inside an evidence directory."""
     socket_path = work / (name + ".qmp.sock")
     if len(str(socket_path).encode()) >= 108:
@@ -422,7 +522,8 @@ def start_vm(work, name, *, flash, disk, serial, kvm, tpm=None, rebootable=False
                           f"(>=108 bytes): {socket_path}")
     return VmSession(work, name,
                      qemu_command(flash, disk, serial, kvm=kvm, tpm=tpm,
-                                  qmp_socket=socket_path, rebootable=rebootable),
+                                  qmp_socket=socket_path, rebootable=rebootable,
+                                  enroll_disk=enroll_disk),
                      socket_path, timeout=timeout).start(serial)
 
 

@@ -13,6 +13,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 from firearc import device, luks, profile
 from firearc.integrity import SafetyError, read_json, sha256, write_json
 from support import temporary
+from test_device import AUTHORITY
 from test_firmware_layout import layout_of, synthetic_image
 
 DEVICE_LABEL = "device-l"
@@ -233,12 +234,35 @@ class LoadTests(unittest.TestCase):
             fabricate(root)
             provision(root)
             target = root / "build/devices/dev1"
+            original = read_json(target / "profile.json")
+            for damage in (lambda d: d.update({"keyslots": ["0", "1", "2"]}),
+                           lambda d: d.update({"volume": "luks1"})):
+                with self.subTest(damage=damage):
+                    stored = json.loads(json.dumps(original))
+                    damage(stored["data"])
+                    profile.save_json(target / "profile.json", stored)
+                    with self.assertRaises(SafetyError) as raised:
+                        profile.load(root, "dev1")
+                    self.assertIn("provisioning contract", str(raised.exception))
+                    profile.save_json(target / "profile.json", original)
+
+    def test_load_accepts_the_enrolled_contract(self):
+        with temporary() as root:
+            fabricate(root)
+            provision(root)
+            target = root / "build/devices/dev1"
             stored = read_json(target / "profile.json")
             stored["data"]["keyslots"] = ["0", "1"]
+            stored["data"]["token"] = {"type": "systemd-tpm2", "pcrs": ["7", "11"]}
+            profile.save_json(target / "profile.json", stored)
+            # load() re-digests the region against the (unchanged) evidence.
+            _, loaded = profile.load(root, "dev1")
+            self.assertEqual(loaded["data"]["keyslots"], ["0", "1"])
+            stored["data"].pop("token")
             profile.save_json(target / "profile.json", stored)
             with self.assertRaises(SafetyError) as raised:
                 profile.load(root, "dev1")
-            self.assertIn("provisioning contract", str(raised.exception))
+            self.assertIn("token record", str(raised.exception))
 
 
 class IdentityTests(unittest.TestCase):
@@ -369,6 +393,34 @@ class HarnessWiringTests(unittest.TestCase):
         self.assertIn("-device tpm-tis,tpmdev=tpm0", joined)
         self.assertEqual(command.count("-tpmdev"), 1)
         self.assertNotIn("tpm-tis", " ".join(device.qemu_command("/f", "/d", "/s", kvm=True)))
+
+    def test_qemu_command_attaches_the_enroll_transport_optionally(self):
+        plain = " ".join(device.qemu_command("/f", "/d", "/s", kvm=True))
+        self.assertEqual(plain.count("ide-hd,"), 1)
+        self.assertNotIn("enroll0", plain)
+        command = device.qemu_command("/f", "/d", "/s", kvm=True,
+                                      enroll_disk="/run/enroll-key.img")
+        joined = " ".join(command)
+        self.assertIn("-drive if=none,id=enroll0,file=/run/enroll-key.img,format=raw", joined)
+        self.assertIn("-device ide-hd,drive=enroll0,bus=ahci0.1", joined)
+        self.assertEqual(joined.count("ide-hd,"), 2)
+
+    def test_data_units_are_ordered_and_probe_is_required(self):
+        payload = device.dev_cpio(AUTHORITY)
+        for unit in (device.DATA_PROBE_UNIT, device.DATA_ENROLL_UNIT):
+            self.assertIn("After=systemd-pcrphase-initrd.service", unit)
+            self.assertIn("After=sysroot.mount", unit)
+            self.assertIn("Before=initrd.target", unit)
+        self.assertIn(b"firearc-data-probe.service", payload)
+        self.assertIn(b"firearc-data-enroll.service", payload)
+        self.assertIn(b"initrd.target.requires/firearc-data-probe.service", payload)
+        self.assertIn(b"initrd.target.requires/firearc-data-enroll.service", payload)
+        # The enrollment command binds PCR 7 plus the signed PCR 11 policy
+        # and unlocks only via the file-handle credential.
+        self.assertIn("--tpm2-pcrs=7", device.DATA_ENROLL_UNIT)
+        self.assertIn("--tpm2-public-key-pcrs=11", device.DATA_ENROLL_UNIT)
+        self.assertIn("--unlock-key-file=/run/firearc-recovery.key", device.DATA_ENROLL_UNIT)
+        self.assertIn("tpm2-device=auto", device.DATA_PROBE_UNIT)
 
     def test_qemu_command_exposes_local_qmp_and_reboot_control(self):
         command = device.qemu_command("/f", "/d", "/s", kvm=True,

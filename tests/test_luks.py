@@ -193,6 +193,67 @@ class HeaderTests(unittest.TestCase):
             luks.assert_binary_identity(blob, uuid="99999999-2222-3333-4444-555555555555")
 
 
+
+def enrolled_header(pem):
+    """The real systemd 257.13 token shape (from the first live enrollment)."""
+    import base64
+    return {
+        "keyslots": {"0": {"type": "luks2"}, "1": {"type": "luks2"}},
+        "tokens": {"0": {"type": "systemd-tpm2", "keyslots": ["1"],
+                         "tpm2-pcrs": [7], "tpm2_pubkey_pcrs": [11],
+                         "tpm2-pcr-bank": "sha256", "tpm2-primary-alg": "ecc",
+                         "tpm2_pubkey": base64.b64encode(pem.encode()).decode()}},
+    }
+
+
+class EnrollTests(unittest.TestCase):
+    def test_enroll_disk_carries_magic_then_credential(self):
+        with temporary() as work:
+            path = work / "enroll-key.img"
+            credential = bytes(range(32))
+            luks.build_enroll_disk(path, credential)
+            import stat
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            blob = path.read_bytes()
+            self.assertEqual(len(blob), luks.ENROLL_DISK_BYTES)
+            self.assertEqual(blob[:len(luks.ENROLL_MAGIC)], luks.ENROLL_MAGIC)
+            self.assertEqual(blob[32:64], credential)
+            self.assertEqual(blob[64:], b"\0" * (luks.ENROLL_DISK_BYTES - 64))
+            with self.assertRaises(SafetyError):
+                luks.build_enroll_disk(work / "other.img", b"short")
+
+    def test_validate_enrolled_accepts_our_contract(self):
+        pem = "-----BEGIN PUBLIC KEY-----\ntest\n-----END PUBLIC KEY-----\n"
+        header = enrolled_header(pem)
+        token = luks.validate_enrolled(header, expected_pem=pem)
+        self.assertEqual(token["type"], "systemd-tpm2")
+        self.assertEqual(token["tpm2_pubkey_pcrs"], [11])
+
+    def test_validate_enrolled_rejects_violations(self):
+        pem = "-----BEGIN PUBLIC KEY-----\ntest\n-----END PUBLIC KEY-----\n"
+        base = enrolled_header(pem)
+        mutations = (
+            lambda h: h["keyslots"].pop("1"),                # token unbound
+            lambda h: h["tokens"]["0"].update({"tpm2-pcrs": ["7", "11"]}),
+            lambda h: h["tokens"]["0"].update({"keyslots": ["0"]}),
+            lambda h: h["tokens"]["0"].pop("tpm2_pubkey"),
+            lambda h: h["tokens"]["0"].update({"tpm2-pcr-bank": "sha1"}),
+            lambda h: h["tokens"]["0"].update({"type": "systemd-fido2"}),
+            lambda h: h["tokens"]["0"].pop("tpm2_pubkey_pcrs"),
+        )
+        for mutate in mutations:
+            header = json.loads(json.dumps(base))
+            mutate(header)
+            with self.subTest(mutate=mutate.__name__ if hasattr(mutate, '__name__') else mutate), \
+                    self.assertRaises(SafetyError):
+                luks.validate_enrolled(header, expected_pem=pem)
+        wrong_key = json.loads(json.dumps(base))
+        wrong_key["tokens"]["0"]["tpm2_pubkey"] = __import__("base64").b64encode(
+            pem.replace("test", "other").encode()).decode()
+        with self.assertRaises(SafetyError):
+            luks.validate_enrolled(wrong_key, expected_pem=pem)
+
+
 class CredentialTests(unittest.TestCase):
     def test_recovery_credential_is_256_bits_and_unique(self):
         first = luks.generate_recovery_credential()

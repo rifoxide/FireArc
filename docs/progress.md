@@ -1,8 +1,9 @@
 # Implementation progress
 
 **Updated:** 2026-10-21. **Stage:** Phase 5 (TPM-bound data) in progress —
-signed PCR 11 authorizations and per-device LUKS2 volumes landed; unlock
-and escrow next. The complete secured appliance is not yet implemented.
+signed PCR 11 authorizations, per-device LUKS2 volumes and TPM2 enrollment
+with unattended unlock landed; unlock ordering and escrow next. The
+complete secured appliance is not yet implemented.
 
 ## Implemented
 
@@ -274,6 +275,26 @@ and escrow next. The complete secured appliance is not yet implemented.
   credentials from byte-identical factory images); the sealed region is
   now device identity — asserted per boot session, drift refused at
   `load`. Both enforcing gates re-passed on the 4-partition geometry.
+- **TPM2 enrollment with unattended unlock** (PLAN Phase 5 item 8
+  complete; ADR 0011, [validation](validation/data-provisioning.md)):
+  `just data-enroll` boots the profile once with a one-shot credential
+  transport disk and lets the guest enroll at `enter-initrd` —
+  `systemd-cryptenroll` with plain PCR 7 binding plus the signed PCR 11
+  policy from the UKI's `/.extra` stub files — then validates in the
+  same boot with a real unattended attach, and verifies the mutated
+  header host-side (keyslots exactly 0+1, one systemd-tpm2 token, signed
+  key byte-equal to `secrets/pcr/pcr.pub`). Every boot now carries a
+  data-unlock probe on the serial contract (`UNLOCK_OK`/`REFUSED`/
+  `TOKEN_ABSENT`), ordered after the root gate and the enter-initrd
+  phase — item 10's rule encoded early. Proven on real profiles: dev9
+  unlocks unattended across cold boots (region digest stable — unlock
+  never writes); dev10 (dev9's disk transplanted onto a fresh swtpm)
+  boots its verified root but the probe reports `UNLOCK_REFUSED` — the
+  item-12 direction previewed. Interrupted enrollment sessions are a
+  first-class case (`enroll_pending` transaction marker + host-side-
+  validated adoption). Findings pinned: plain cryptsetup was missing
+  from the minimal initrd (probe rc=127 → now asserted by check-initrd);
+  stub 257 exposes signature files under `/.extra/`, not `/.tpm2-*`.
 - Operations note (recorded after investigating): external `docker image
   prune` deleted the digest-pinned tagless tools and SDK images; the harness
   now treats a cached tools stage whose image is absent from docker as stale
@@ -283,7 +304,7 @@ and escrow next. The complete secured appliance is not yet implemented.
 
 ## Validation
 
-The label-free bootstrap/build/verification pipeline and 237 offline tests pass.
+The label-free bootstrap/build/verification pipeline and 243 offline tests pass.
 The fresh-clone build/verification passed, and `just reproduce --yes` completed
 two empty-cache download/build/verification rounds with **byte-identical
 payloads** (kernel, initramfs, root tar, ext4, verity tree, authority). The
@@ -300,11 +321,11 @@ byte-reproducibility result is implied by the implementation list above.
 
 ## Next gates
 
-1. Phase 5 items 7–15: escrow of the recovery credential (owner decision
-   pending on the secret-handling path), `systemd-cryptenroll` with PCR 7
-   binding plus the signed PCR 11 policy (item 5's `enter-initrd`
-   authorizations and item 6's per-device volumes are in place),
-   crypttab/unlock ordering, and the move/refusal test matrix.
+1. Phase 5 items 7 and 9–15: escrow of the recovery credential (owner
+   decision pending on the secret-handling path), crypttab/unlock
+   ordering with `/data` mounts (items 9–10), the A/B update-compat,
+   move/refusal and tamper matrix (items 11–13), and the escrow
+   rehearsal (items 14–15).
 2. Phase 6+ (RAUC updates, health/rollback, attestation, recovery, release
    hardening/CI) per PLAN §1.2 after the data-unlock chain lands.
 G0/G1/G3 and later acceptance gates remain open. Hardware, legal review,

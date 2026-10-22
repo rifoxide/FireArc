@@ -52,6 +52,12 @@ LUKS2_VERSION = 2
 # raw bytes (cryptsetup --key-file consumes the file verbatim).
 RECOVERY_BYTES = 32
 LUKS_LABEL = "FIREARC_DATA"
+# One-shot enrollment transport (Phase 5 item 8): 32-byte magic block
+# followed by the 32-byte recovery credential, padded to one sector.
+ENROLL_MAGIC = b"FIREARC-ENROLL-KEY-V1\n"
+ENROLL_DISK_BYTES = 512
+# The systemd-tpm2 LUKS2 token fields the enrollment contract pins.
+TOKEN_TYPE = "systemd-tpm2"
 # cryptsetup 2.7.5 defaults kept deliberately: argon2id KDF, aes-xts-plain64,
 # 16 MiB metadata area, 512-byte sectors. Evidence records the effective
 # parameters from luksDump rather than pinning them in code.
@@ -172,6 +178,78 @@ def write_secret(path, blob):
     finally:
         os.close(descriptor)
     os.chmod(path, 0o600)
+
+
+def build_enroll_disk(path, credential):
+    """Write the one-shot enrollment transport: magic block + credential."""
+    if len(credential) != RECOVERY_BYTES:
+        raise SafetyError("Enrollment transport requires the exact credential size")
+    blob = ENROLL_MAGIC + b"\0" * (32 - len(ENROLL_MAGIC)) + credential
+    blob += b"\0" * (ENROLL_DISK_BYTES - len(blob))
+    if len(blob) != ENROLL_DISK_BYTES:
+        raise SafetyError("Enrollment transport has unexpected size")
+    write_secret(path, blob)
+    return blob
+
+
+def validate_enrolled(header, *, expected_pem=None):
+    """Fail-closed checks on an enrolled header (real systemd 257.13 token
+    structure, pinned from the first live enrollment): keyslot 1 bound to
+    exactly one systemd-tpm2 token, plain PolicyPCR on 7 (SHA-256 bank),
+    signed policy on PCR 11 under the PCR-policy public key, whose base64
+    PEM body must equal the UKI's .pcrpkey bytes."""
+    import base64
+    if set(header.get("keyslots", {})) != {"0", "1"}:
+        raise SafetyError(f"Enrolled keyslot inventory {sorted(header.get('keyslots', {}))} "
+                          "does not match the enrollment contract")
+    tokens = header.get("tokens", {})
+    if set(tokens) != {"0"} or tokens["0"].get("type") != TOKEN_TYPE:
+        raise SafetyError("Expected exactly one systemd-tpm2 token")
+    token = tokens["0"]
+    if token.get("keyslots") != ["1"]:
+        raise SafetyError("The TPM2 token does not bind keyslot 1")
+    plain_pcrs = {str(value) for value in token.get("tpm2-pcrs", [])}
+    if plain_pcrs != {"7"}:
+        raise SafetyError(f"The token's plain PCR binding {sorted(plain_pcrs)} is not "
+                          "the explicit PCR 7 binding")
+    signed_pcrs = {str(value) for value in
+                   (token.get("tpm2_pubkey_pcrs") or token.get("tpm2-public-key-pcrs") or [])}
+    if signed_pcrs != {"11"}:
+        raise SafetyError(f"The token's signed PCR set {sorted(signed_pcrs)} is not "
+                          "the signed PCR 11 policy")
+    if token.get("tpm2-pcr-bank") not in (None, "sha256"):
+        raise SafetyError("The TPM2 token does not use the SHA-256 bank")
+    pubkey = token.get("tpm2_pubkey") or ""
+    if not pubkey:
+        raise SafetyError("The TPM2 token lacks the signed-policy public key")
+    try:
+        decoded = base64.b64decode(pubkey, validate=True).decode()
+    except (ValueError, TypeError) as error:
+        raise SafetyError(f"The token's public key is not base64 PEM: {error}")
+    if "BEGIN PUBLIC KEY" not in decoded:
+        raise SafetyError("The token's public key is not a PEM public key")
+    if expected_pem is not None and decoded.strip() != expected_pem.strip():
+        raise SafetyError("The TPM2 token was enrolled under a different "
+                          "PCR-policy public key than the UKI carries")
+    return token
+
+
+def expected_pcr_policy(root):
+    """The PCR-policy public key (PEM text, fingerprint) this project signs
+    with: the canonical public half under secrets/pcr (ADR 0009 custody).
+    The UKI's .pcrpkey section carries exactly these bytes (the item-5
+    stage asserts that), so the enrolled token must carry them too.
+    """
+    from . import pcr_keys
+    status, directory = pcr_keys.state(root)
+    if status != "complete":
+        raise SafetyError("PCR-policy key absent; cannot validate TPM2 "
+                          "enrollment against the signed policy (run just pcr-keys)")
+    manifest = read_json(regular_file(directory, "manifest.json"))
+    pem = regular_file(directory, "pcr.pub").read_text()
+    if "BEGIN PUBLIC KEY" not in pem:
+        raise SafetyError("PCR-policy public key is not a bare PEM public key")
+    return pem, manifest.get("pkfp", "")
 
 
 def format_arguments():
