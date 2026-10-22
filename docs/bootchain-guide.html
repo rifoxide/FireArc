@@ -1,0 +1,641 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FireArc — Boot Chain &amp; Build Guide</title>
+<style>
+:root{
+  --bg:#0b0f14; --panel:#11161d; --panel2:#161d26; --line:#232c38;
+  --text:#cfd8e3; --dim:#8b98a9; --accent:#4cc38a; --accent2:#59a7ff;
+  --warn:#f0b429; --bad:#ff6b6b; --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.55 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+.wrap{max-width:1180px;margin:0 auto;padding:28px 20px 80px}
+h1{font-size:26px;margin:0 0 4px}
+h2{font-size:20px;margin:40px 0 12px;color:#fff;border-bottom:1px solid var(--line);padding-bottom:8px}
+h3{font-size:16px;margin:20px 0 8px;color:#fff}
+p{margin:6px 0}
+.sub{color:var(--dim);margin-bottom:24px}
+code,.cmd{font-family:var(--mono);font-size:13px;background:#1a2330;border:1px solid var(--line);border-radius:4px;padding:1px 6px;color:#9fe3bd;white-space:nowrap}
+pre{font-family:var(--mono);font-size:12.5px;background:#0d1319;border:1px solid var(--line);border-radius:8px;padding:12px;overflow:auto;line-height:1.6}
+code{color:#9fe3bd}
+.tag{display:inline-block;font-size:11px;font-weight:600;letter-spacing:.4px;padding:2px 8px;border-radius:10px;margin-right:6px;vertical-align:middle}
+.tag.ok{background:#123524;color:var(--accent)} .tag.warn{background:#3a2e0a;color:var(--warn)}
+.tag.bad{background:#3a1414;color:var(--bad)} .tag.info{background:#0f2740;color:var(--accent2)}
+.grid{display:grid;gap:14px}
+.g2{grid-template-columns:1fr 1fr} .g3{grid-template-columns:1fr 1fr 1fr}
+@media(max-width:900px){.g2,.g3{grid-template-columns:1fr}}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+.card h3{margin-top:0}
+ul{margin:6px 0;padding-left:20px} li{margin:3px 0}
+.dim{color:var(--dim)} .small{font-size:13px}
+
+/* Boot chain diagram */
+.chain{display:flex;flex-direction:column;gap:0}
+.stage{display:grid;grid-template-columns:56px 1fr;gap:0;cursor:pointer}
+.rail{display:flex;flex-direction:column;align-items:center}
+.dot{width:34px;height:34px;border-radius:50%;background:var(--panel2);border:2px solid var(--accent);
+     display:flex;align-items:center;justify-content:center;font-weight:700;font-size:14px;color:var(--accent);flex:none}
+.wire{width:2px;flex:1;background:linear-gradient(var(--accent) 60%,var(--line) 60%);background-size:100% 14px;min-height:18px}
+.stagebox{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:8px;
+          padding:10px 14px;margin:0 0 10px 0}
+.stage[data-fail="hard"] .stagebox{border-left-color:var(--bad)}
+.stage[data-fail="closed"] .stagebox{border-left-color:var(--warn)}
+.stage:hover .stagebox{border-color:var(--accent2);border-left-color:var(--accent2)}
+.stage.active .stagebox{background:var(--panel2);border-color:var(--accent2);border-left-color:var(--accent2)}
+.stagebox b{color:#fff}
+.stagebox .one{margin:2px 0 0}
+.detail{background:var(--panel2);border:1px solid var(--accent2);border-radius:10px;padding:16px 18px;margin:4px 0 18px;display:none}
+.detail.show{display:block}
+.detail dt{font-weight:700;color:var(--accent2);margin-top:10px}
+.detail dd{margin:2px 0 0 0}
+.kv{display:grid;grid-template-columns:130px 1fr;gap:4px 10px;font-size:13.5px}
+.kv b{color:#fff;font-weight:600}
+
+/* PCR ladder */
+.pcr{font-family:var(--mono);font-size:12.5px}
+.pcr .row{display:grid;grid-template-columns:70px 1fr;gap:8px;padding:3px 0;border-bottom:1px dashed var(--line)}
+.pcr .v{color:var(--dim)}
+
+/* SVG diagram panels */
+.svgpanel{background:#0d1319;border:1px solid var(--line);border-radius:10px;padding:14px;overflow-x:auto}
+svg{max-width:100%;height:auto;display:block}
+svg text{font-family:system-ui,sans-serif}
+svg .mono{font-family:var(--mono)}
+svg .box{fill:#161d26;stroke:#2c3a4d;stroke-width:1.4;rx:6}
+svg .boxhot{cursor:pointer}
+svg .boxhot:hover{stroke:var(--accent2);stroke-width:2}
+svg .lbl{fill:#e8eef5;font-size:13px;font-weight:600}
+svg .sub{fill:#8b98a9;font-size:10.5px}
+svg .arr{stroke:#4cc38a;stroke-width:1.6;fill:none;marker-end:url(#ah)}
+svg .arrb{stroke:#59a7ff;stroke-width:1.4;fill:none;stroke-dasharray:5 4;marker-end:url(#ahb)}
+svg .key{fill:#0f2740;stroke:#59a7ff;stroke-width:1.2}
+svg .keyt{fill:#9fc6ff;font-size:10.5px}
+
+/* Tabs */
+.tabs{display:flex;gap:6px;flex-wrap:wrap;margin:14px 0}
+.tab{background:var(--panel2);border:1px solid var(--line);color:var(--dim);border-radius:8px;
+     padding:7px 14px;cursor:pointer;font-size:13.5px;font-weight:600}
+.tab.active{color:#fff;border-color:var(--accent);background:#123524}
+.tab:hover{border-color:var(--accent2);color:#fff}
+.panel{display:none} .panel.show{display:block}
+
+/* Command table */
+input[type=search]{width:100%;padding:9px 12px;background:var(--panel2);border:1px solid var(--line);
+  border-radius:8px;color:var(--text);font-size:14px;margin:10px 0}
+table{width:100%;border-collapse:collapse;font-size:13.5px}
+th{color:var(--dim);text-align:left;font-size:12px;text-transform:uppercase;letter-spacing:.6px;padding:8px 10px;border-bottom:1px solid var(--line)}
+td{padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+tr:hover td{background:#131b25}
+td .cmd{display:inline-block}
+
+/* HW checklist */
+.hw li{margin:6px 0}
+.req{color:var(--accent);font-weight:700} .opt{color:var(--warn);font-weight:700}
+footer{margin-top:60px;color:var(--dim);font-size:12.5px;border-top:1px solid var(--line);padding-top:14px}
+details{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:10px 14px;margin:8px 0}
+summary{cursor:pointer;font-weight:600;color:#fff}
+.badge{font-family:var(--mono);font-size:11.5px;color:var(--accent);background:#0d1f16;border:1px solid #1d3a2b;border-radius:4px;padding:1px 6px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>FireArc — Boot Chain &amp; Build Guide</h1>
+<p class="sub">Development trust domain (QEMU Q35) · enforced chain complete through TPM2-bound data · generated 2026-10-21</p>
+
+<!-- ============================================================ BOOT CHAIN -->
+<h2>1 · The enforced boot chain</h2>
+<p>Every arrow is a verification. Nothing executes unless the previous stage verified it. Any failure stops the boot — the machine powers off, it never falls back to something unverified.</p>
+
+<div class="chain" id="chain">
+
+  <div class="stage" data-step="0" data-fail="hard">
+    <div class="rail"><div class="dot">0</div><div class="wire"></div></div>
+    <div class="stagebox"><b>Host ROM anchor</b> — QEMU loads flash only if its SHA-256 matches the pinned digest
+      <p class="one dim small">coreboot RO + vboot key block are immutable from the VM's point of view</p></div>
+  </div>
+
+  <div class="stage" data-step="1" data-fail="hard">
+    <div class="rail"><div class="dot">1</div><div class="wire"></div></div>
+    <div class="stagebox"><b>coreboot — vboot protected RW</b> — the mutable RW section must be signed by the vboot keyset
+      <p class="one dim small">signature verified <i>before</i> the Dasharo payload executes · tampered RW ⇒ refused</p></div>
+  </div>
+
+  <div class="stage" data-step="2" data-fail="hard">
+    <div class="rail"><div class="dot">2</div><div class="wire"></div></div>
+    <div class="stagebox"><b>Dasharo / EDK II — Secure Boot</b> — <code>SecureBoot=1 · SetupMode=0</code>, PK/KEK/db enrolled
+      <p class="one dim small">every EFI binary checked against db · unsigned / wrong-key ⇒ refused before launch</p></div>
+  </div>
+
+  <div class="stage" data-step="3" data-fail="hard">
+    <div class="rail"><div class="dot">3</div><div class="wire"></div></div>
+    <div class="stagebox"><b>systemd-boot</b> — signed with the sb key, at the firmware entry on the ESP
+      <p class="one dim small">menu locked, zero timeout · loads exactly one UKI</p></div>
+  </div>
+
+  <div class="stage" data-step="4" data-fail="hard">
+    <div class="rail"><div class="dot">4</div><div class="wire"></div></div>
+    <div class="stagebox"><b>UKI — systemd-stub</b> — kernel + initrd + cmdline + policy, one signed PE
+      <p class="one dim small">measures every section into <b>PCR 11</b> · publishes <span class="badge">/.extra/tpm2-pcr-signature.json</span> <span class="badge">/.extra/tpm2-pcr-public-key.pem</span></p></div>
+  </div>
+
+  <div class="stage" data-step="5" data-fail="closed">
+    <div class="rail"><div class="dot">5</div><div class="wire"></div></div>
+    <div class="stagebox"><b>initrd — root integrity gate</b> — full dm-verity pre-verify, then read-only mapping
+      <p class="one dim small">expected hash/salt live <i>inside the signed UKI</i> · root tamper ⇒ poweroff · extends PCR 11 with the phase</p></div>
+  </div>
+
+  <div class="stage" data-step="6" data-fail="closed">
+    <div class="rail"><div class="dot">6</div><div class="wire"></div></div>
+    <div class="stagebox"><b>Real root (read-only)</b> — systemd boots from the verity mapping
+      <p class="one dim small">runtime reads stay under verity · tamper later ⇒ EIO · prints <span class="badge">FIREARC_DEV_BOOT_OK</span></p></div>
+  </div>
+
+  <div class="stage" data-step="7" data-fail="closed">
+    <div class="rail"><div class="dot">7</div><div class="wire"></div></div>
+    <div class="stagebox"><b>Data unlock probe</b> — only <i>after</i> the root gate: TPM2 token unseal, attach, detach
+      <p class="one dim small">refusal never blocks the verified root · verdict on serial: <span class="badge">UNLOCK_OK / REFUSED / TOKEN_ABSENT</span></p></div>
+  </div>
+
+  <div class="stage" data-step="8" data-fail="closed">
+    <div class="rail"><div class="dot">8</div></div>
+    <div class="stagebox"><b>LUKS2 data volume</b> — per-device, aes-xts-plain64, 512-bit
+      <p class="one dim small">keyslot 0 = recovery credential (escrow pending) · keyslot 1 = TPM2 token</p></div>
+  </div>
+</div>
+
+<div class="detail" id="detail"></div>
+
+<script>
+const STEPS = {
+ "0": {
+  "t": "Host ROM anchor",
+  "rows": [
+   "Who verifies",
+   "The QEMU host harness",
+   "What is checked",
+   "flash.rom SHA-256 == pinned digest from the build",
+   "What it protects",
+   "coreboot RO region + vboot key block — the root of trust",
+   "Fail mode",
+   "Host refuses to start the machine at all",
+   "Note",
+   "This stands in for hardware ROM write-protection (Boot Guard / PR0). On real hardware there is no host — see section 4."
+  ]
+ },
+ "1": {
+  "t": "coreboot — vboot protected RW",
+  "rows": [
+   "Who verifies",
+   "coreboot RO code (vboot reference)",
+   "What is checked",
+   "RW section signature against the vboot public key (dev keyset, digest-pinned)",
+   "Why a signed RW",
+   "Flash is one file; RW holds the payload. Signing RW gives verified boot without a second ROM",
+   "Measured",
+   "coreboot + EDK II events → PCRs 0–3, event log replayed every boot",
+   "Fail mode",
+   "RW never executes; no payload, machine halts",
+   "Proof",
+   "check-firmware-vboot: signed RW boots · tampered RW and attacker-keyed RW refused"
+  ]
+ },
+ "2": {
+  "t": "Dasharo / EDK II — Secure Boot",
+  "rows": [
+   "Who verifies",
+   "EDK II DXE security driver",
+   "What is checked",
+   "PK/KEK/db chain · EFI images signed by a db-trusted cert",
+   "State",
+   "SecureBoot=1, SetupMode=0 — enforced after cold start (asserted every boot)",
+   "Current keys",
+   "Development domain (Dasharo defaults + dev enrollment). FireArc-owned PK/KEK/db is Phase 2 item 12",
+   "Measured",
+   "Secure Boot state + keys → PCR 7",
+   "Fail mode",
+   "Unsigned / wrong-key image refused before launch; machine powers off",
+   "Proof",
+   "check-secure-boot: signed chain boots · tampered UKI, modified loader, wrong key all refused · variable store survives"
+  ]
+ },
+ "3": {
+  "t": "systemd-boot",
+  "rows": [
+   "Who verifies",
+   "EDK II (its own signature, sb key in db)",
+   "Where",
+   "\\EFI\\SYSTEMD\\SYSTEMD-BOOTX64.EFI on the ESP",
+   "Locked down",
+   "No menu editing, no other entries, timeout 0",
+   "Watch out",
+   "The ESP is FAT32 — a shared mutable store. Power-loss atomicity of ESP writes is a release gate (Phase 12)",
+   "Next-phase gap",
+   "Fallback BOOTX64.EFI path + A/B entries + boot counting = Phase 4"
+  ]
+ },
+ "4": {
+  "t": "UKI — systemd-stub",
+  "rows": [
+   "What it is",
+   "One signed PE: kernel + initrd + cmdline + .pcrsig + .pcrpkey",
+   "Measured",
+   "All sections hashed into PCR 11 (kernel, initrd, cmdline, sections)",
+   "Policy pieces",
+   "/.extra/tpm2-pcr-signature.json (signed by the PCR-policy key, pkfp 4aaa9ed7…) and /.extra/tpm2-pcr-public-key.pem — consumed by cryptenroll/unlock",
+   "Cmdline pins",
+   "root=/dev/mapper/firearc-root ro rauc.slot=A rd.shell=0 rd.emergency=poweroff",
+   "Watch out",
+   "Any byte change in kernel/initrd/cmdline changes PCR 11 — the old .pcrsig no longer matches. This is the update mechanism (re-sign), not a bug"
+  ]
+ },
+ "5": {
+  "t": "initrd — root integrity gate",
+  "rows": [
+   "Order",
+   "verity pre-verify → open read-only mapping → mount",
+   "Authority",
+   "Expected root hash + salt + geometry come from the UKI cmdline — signed content, not a mutable file",
+   "Audited binaries",
+   "check-initrd asserts exact tools: systemd-cryptenroll, systemd-cryptsetup, cryptsetup, TPM2 token plugin, dd — the crypt dracut modules are deliberately omitted (no prompts, no auto crypttab)",
+   "Phase measurement",
+   "systemd-pcrphase-initrd extends PCR 11 at enter-initrd — authorized by the signed .pcrsig",
+   "Fail mode",
+   "Bad/missing hash tree ⇒ poweroff (fail closed, no shell)",
+   "Proof",
+   "check-initrd + per-boot assertion FIREARC_VERITY_PREVERIFY_OK · runtime tamper test gives EIO"
+  ]
+ },
+ "6": {
+  "t": "Real root — read-only",
+  "rows": [
+   "Mount",
+   "dm-verity mapping mounted ro,noload; systemd PID 1 starts",
+   "Marker",
+   "FIREARC_DEV_BOOT_OK on serial — the boot contract the harness asserts",
+   "Continuity",
+   "Every boot asserts flash-digest, TPM-state-digest and data-region-digest continuity; drift refuses at load",
+   "Next-phase gap",
+   "/data mounts and bind mounts land with items 9–10 (ordering rule already encoded: unlock only after the root gate)"
+  ]
+ },
+ "7": {
+  "t": "Data unlock probe",
+  "rows": [
+   "Order",
+   "After sysroot.mount and pcrphase-initrd — item 10's invariant from day one",
+   "How",
+   "systemd-cryptsetup attach with tpm2-device=auto → token PolicyPCR(7) + PolicyAuthorize(PCR 11, signed) → unseal → attach → detach",
+   "Verdicts",
+   "FIREARC_DATA_UNLOCK_OK · _REFUSED · _TOKEN_ABSENT · _PROBE_NO_TPM/_NO_DISK/_PCRSIG_MISSING",
+   "Identity rule",
+   "Unlock never writes: the LUKS region digest is asserted unchanged every boot",
+   "Proven",
+   "dev9: UNLOCK_OK across cold boots · dev10 (dev9's disk on a fresh swtpm): UNLOCK_REFUSED — wrong TPM can never unseal",
+   "Watch out",
+   "PCR 7 changes when Secure Boot keys change ⇒ token refuses until re-enrollment. Stage measurement-policy transitions before key rotation (Phase 10 item 6)"
+  ]
+ },
+ "8": {
+  "t": "LUKS2 data volume",
+  "rows": [
+   "Geometry",
+   "GPT partition 4 · label FIREARC_DATA · 256 MiB dev / remainder production · type GUID ca7d7ccb-63ed-4c53-861c-1742536059cc",
+   "Crypto",
+   "cryptsetup 2.7.5 · argon2id KDF · aes-xts-plain64 · 512-bit key",
+   "Keyslots",
+   "0 = 256-bit recovery credential (file 0600 under profile secrets/, escrow pending item 7) · 1 = TPM2 token (PCR 7 plain + signed PCR 11)",
+   "Per-device",
+   "Unique UUID/salts/credential from byte-identical factory images — proven dev7 vs dev8",
+   "Volume creation",
+   "Only during explicit device-provision — factory image ships a blank-asserted partition (asserted twice, then formatted)",
+   "Watch out",
+   "An old header backup restores old keyslots — header-backup retention policy is item 15"
+  ]
+ }
+};
+const chain=document.getElementById('chain'),detail=document.getElementById('detail');
+function show(n){
+  document.querySelectorAll('.stage').forEach(s=>s.classList.toggle('active',s.dataset.step==n));
+  const s=STEPS[n];let h='<h3>'+s.t+'</h3><dl class="kv">';
+  for(let i=0;i<s.rows.length;i+=2){h+='<dt>'+s.rows[i]+'</dt><dd>'+s.rows[i+1]+'</dd>'}
+  h+='</dl>';detail.innerHTML=h;detail.classList.add('show');
+}
+chain.addEventListener('click',e=>{const st=e.target.closest('.stage');if(st)show(st.dataset.step)});
+show(0);
+</script>
+
+<h3>PCR board — what seals the data volume</h3>
+<div class="grid g2">
+<div class="card pcr">
+  <b>PCR 7 — plain binding (Secure Boot state)</b>
+  <div class="row"><span>extended by</span><span>EDK II: PK/KEK/db contents + SecureBoot flag</span></div>
+  <div class="row"><span>changes when</span><span>Secure Boot keys are re-enrolled</span></div>
+  <div class="row"><span>used by</span><span>token PolicyPCR — must match exactly to unseal</span></div>
+  <div class="row"><span>current value</span><span class="v">stable across boots · asserted every boot</span></div>
+</div>
+<div class="card pcr">
+  <b>PCR 11 — signed policy (measured boot)</b>
+  <div class="row"><span>extended by</span><span>systemd-stub (UKI sections) + pcrphase-initrd</span></div>
+  <div class="row"><span>current sha256</span><span class="v">8b034d5545cf6e54… (changes with every rebuild — by design)</span></div>
+  <div class="row"><span>used by</span><span>PolicyAuthorize: valid iff .pcrsig signed by pkfp 4aaa9ed7…</span></div>
+  <div class="row"><span>why signed</span><span>a new UKI + new signature re-authorizes without re-enrollment</span></div>
+</div>
+</div>
+<p class="small dim">Click any stage above for its full detail. Rule of thumb: <b>PCR 7 = which keys</b>, <b>PCR 11 = which software</b>.</p>
+
+<!-- ============================================================ ENROLL FLOW -->
+<h2>2 · TPM2 enrollment — one session, three proofs</h2>
+<div class="svgpanel">
+<svg viewBox="0 0 1080 330" xmlns="http://www.w3.org/2000/svg">
+<defs>
+<marker id="ah" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0L7,3L0,6z" fill="#4cc38a"/></marker>
+<marker id="ahb" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0L7,3L0,6z" fill="#59a7ff"/></marker>
+</defs>
+<!-- harness -->
+<rect class="box" x="10" y="16" width="200" height="58"/><text class="lbl" x="22" y="38">just data-enroll</text>
+<text class="sub" x="22" y="55">profile.data_enroll()</text>
+<rect class="box" x="10" y="120" width="200" height="44"/><text class="lbl mono" x="22" y="147" font-size="12">FIREARC-ENROLL-KEY-V1</text>
+<text class="sub" x="120" y="172" text-anchor="middle">one-shot transport disk (512 B)</text>
+<rect class="box" x="10" y="250" width="200" height="58"/><text class="lbl" x="22" y="272">host validation</text>
+<text class="sub" x="22" y="289">keyslots 0+1 · token shape · PEM == pcr.pub</text>
+<!-- guest -->
+<rect class="box" x="300" y="16" width="230" height="58"/><text class="lbl" x="312" y="38">guest · enroll unit @ enter-initrd</text>
+<text class="sub" x="312" y="55">reads credential via dd · scrubs after use</text>
+<rect class="box" x="300" y="120" width="230" height="88"/>
+<text class="lbl mono" x="312" y="143" font-size="11.5">systemd-cryptenroll</text>
+<text class="sub mono" x="312" y="161" font-size="10.5">--tpm2-pcrs=7</text>
+<text class="sub mono" x="312" y="177" font-size="10.5">--tpm2-public-key-pcrs=11</text>
+<text class="sub mono" x="312" y="193" font-size="10.5">--tpm2-signature=/.extra/…pcrsig</text>
+<rect class="box" x="300" y="250" width="230" height="58"/><text class="lbl" x="312" y="272">probe unit</text>
+<text class="sub" x="312" y="289">attach → UNLOCK_OK → detach</text>
+<!-- tpm / volume -->
+<rect class="box key" x="640" y="120" width="200" height="88"/><text class="keyt" x="652" y="141">swtpm (per-device state)</text>
+<text class="sub" x="652" y="160">seals keyslot 1 under</text>
+<text class="sub" x="652" y="176">PolicyPCR(7) +</text>
+<text class="sub" x="652" y="192">PolicyAuthorize(11, pkfp 4aaa…)</text>
+<rect class="box" x="640" y="250" width="200" height="58"/><text class="lbl" x="652" y="272">LUKS2 header</text>
+<text class="sub" x="652" y="289">new token → keyslot 1</text>
+<!-- profile -->
+<rect class="box" x="920" y="120" width="150" height="88"/><text class="lbl" x="932" y="141">profile.json</text>
+<text class="sub" x="932" y="160">region digest</text>
+<text class="sub" x="932" y="176">token inventory</text>
+<text class="sub" x="932" y="192">policy pkfp</text>
+<!-- arrows -->
+<path class="arr" d="M210,45 C255,45 255,45 300,45"/>
+<path class="arr" d="M210,142 C255,142 255,45 300,45"/>
+<path class="arr" d="M415,74 L415,120"/>
+<path class="arrb" d="M530,164 L640,164"/>
+<path class="arrb" d="M415,208 L415,250"/>
+<path class="arr" d="M530,279 L640,279"/>
+<path class="arr" d="M840,180 C890,180 880,164 920,164"/>
+<path class="arr" d="M415,308 C415,330 250,320 210,295"/>
+<text class="sub" x="455" y="235" >unlock proof</text>
+<text class="sub" x="555" y="152" >seal</text>
+<text class="sub" x="850" y="150" >record</text>
+</svg>
+</div>
+<div class="grid g2">
+<div class="card">
+<h3>Interrupted session = adopted, never wedged</h3>
+<ul class="small">
+<li><code>enroll_pending</code> marker set before power-on</li>
+<li>Load tolerates region drift only while the marker is set</li>
+<li>Next run validates the on-disk token host-side and adopts it — or refuses</li>
+<li>No silent re-seal of an already-sealed volume</li>
+</ul>
+</div>
+<div class="card">
+<h3>Moved disk = refused (proven)</h3>
+<ul class="small">
+<li>dev9's disk on dev10's fresh swtpm: verified root still boots</li>
+<li>Token unseal fails — the blob only opens on the sealing TPM</li>
+<li><code>FIREARC_DATA_UNLOCK_REFUSED</code> on serial, boot contract fails loud</li>
+<li>Copying the whole old TPM state across would defeat this — production must bind identity to the physical TPM</li>
+</ul>
+</div>
+</div>
+
+<!-- ============================================================ JUST FILE -->
+<h2>3 · Build &amp; run — the <code>just</code> recipes</h2>
+<p>Build is a <b>staged pipeline</b>: each stage hashes its inputs, produces evidence under <code>build/</code>, and the next stage consumes only verified outputs. Stages auto-resolve their dependencies — no labels to pass.</p>
+
+<div class="svgpanel">
+<svg viewBox="0 0 1080 240" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah2" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0L7,3L0,6z" fill="#4cc38a"/></marker></defs>
+<text class="lbl" x="10" y="20">ACQUIRE (network, once)</text>
+<rect class="box" x="10" y="30" width="130" height="40"/><text class="sub" x="20" y="54">bootstrap · pinned digests</text>
+<text class="lbl" x="170" y="20">BUILD (offline, ordered)</text>
+<rect class="box" x="170" y="30" width="120" height="40"/><text class="sub" x="180" y="54">build-tools</text>
+<rect class="box" x="310" y="30" width="120" height="40"/><text class="sub" x="320" y="54">build-root / rootfs</text>
+<rect class="box" x="170" y="100" width="120" height="40"/><text class="sub" x="180" y="124">firmware-sources</text>
+<rect class="box" x="310" y="100" width="120" height="40"/><text class="sub" x="320" y="124">firmware-build</text>
+<rect class="box" x="450" y="100" width="110" height="40"/><text class="sub" x="460" y="124">futility</text>
+<rect class="box" x="450" y="30" width="110" height="40"/><text class="sub" x="460" y="54">uki (unsigned)</text>
+<rect class="box" x="590" y="30" width="100" height="40"/><text class="sub" x="600" y="54">pcr-sign</text>
+<rect class="box" x="590" y="100" width="100" height="40"/><text class="sub" x="600" y="124">firmware-sign</text>
+<text class="lbl" x="730" y="20">SIGN &amp; ENROLL (needs keys)</text>
+<rect class="box" x="730" y="30" width="90" height="40"/><text class="sub" x="740" y="54">sign</text>
+<rect class="box" x="730" y="100" width="90" height="40"/><text class="sub" x="740" y="124">enroll</text>
+<text class="lbl" x="860" y="20">ASSEMBLE</text>
+<rect class="box" x="860" y="65" width="90" height="40"/><text class="sub" x="870" y="89">device</text>
+<text class="lbl" x="10" y="180">GATES (boot QEMU, must pass)</text>
+<rect class="box" x="10" y="190" width="180" height="36"/><text class="sub" x="20" y="212">check-firmware-vboot · check-secure-boot</text>
+<rect class="box" x="210" y="190" width="150" height="36"/><text class="sub" x="220" y="212">check-boot · check-initrd · check-rootfs</text>
+<path class="arr" d="M140,50 L170,50"/><path class="arr" d="M290,50 L310,50"/><path class="arr" d="M430,50 L450,50"/>
+<path class="arr" d="M560,50 L590,50"/><path class="arr" d="M690,50 L730,50"/><path class="arr" d="M290,120 L310,120"/>
+<path class="arr" d="M430,120 L450,120"/><path class="arr" d="M560,120 L590,120"/>
+<path class="arrb" d="M690,120 C730,120 700,70 730,70"/>
+<path class="arr" d="M820,50 C850,50 830,85 860,85"/><path class="arr" d="M820,120 C850,120 830,85 860,85"/>
+<path class="arr" d="M905,105 C905,160 500,170 400,190"/>
+</svg>
+<p class="small dim" style="margin:6px 0 0">Shorthand: <code>just build</code> runs the whole pipeline; <code>just verify-build</code> re-checks every stage's evidence without rebuilding.</p>
+</div>
+
+<div class="tabs" id="cmdtabs">
+  <button class="tab active" data-p="p-all">All</button>
+  <button class="tab" data-p="p-build">Build</button>
+  <button class="tab" data-p="p-keys">Keys &amp; signing</button>
+  <button class="tab" data-p="p-gates">Verification gates</button>
+  <button class="tab" data-p="p-dev">Device lifecycle</button>
+  <button class="tab" data-p="p-maint">Maintenance</button>
+</div>
+<input type="search" id="cmdfilter" placeholder="filter commands… (e.g. boot, sign, device)">
+<div class="panel show" id="p-all"></div>
+<div class="panel" id="p-build"></div>
+<div class="panel" id="p-keys"></div>
+<div class="panel" id="p-gates"></div>
+<div class="panel" id="p-dev"></div>
+<div class="panel" id="p-maint"></div>
+
+<script>
+const CMDS=[
+// cmd, group, needs, what it does (one line), note
+["bootstrap","build","network, once","Downloads every pinned public dependency by digest. The only step that touches the network.","No pin match ⇒ hard failure. Never bypass."],
+["build-tools","build","bootstrap","Compiles the pinned toolchain container image.","All later stages run inside it."],
+["build-root / build-rootfs","build","tools","mkosi Debian root + deterministic ext4 + verity tree from the pinned snapshot.","Root bytes freeze here — nothing may touch them after verity computation."],
+["uki","build","root","Assembles the unsigned slot-A UKI (ukify): kernel + initrd + cmdline.","Inputs frozen; content hash feeds PCR 11."],
+["pcr-sign","build","uki, pcr-keys","Rebuilds the UKI with signed .pcrsig/.pcrpkey (systemd-measure).","Distinct role from the sb signer — by design."],
+["firmware-sources","build","network, once","Fetches pinned upstream coreboot + Dasharo at exact commits.",""],
+["firmware-build","build","firmware-sources","Compiles the Q35 ROM offline inside the pinned SDK.",""],
+["firmware-layout","build","firmware-build","Maps flash regions: RO/RW, SMMSTORE, gaps, vboot capacity.","Archived as evidence."],
+["futility","build","firmware-sources","Builds the vboot signing tool from the same sources.",""],
+["firmware-sign","keys","vboot-keys, futility","Signs the firmware RW section with the dev vboot keyset.",""],
+["sign","keys","keys, uki","Signs UKI + systemd-boot with the sb key.","Container sees only sb.key/sb.crt."],
+["enroll","keys","keys","Writes PK/KEK/db into the variable store, sets SecureBoot=1/SetupMode=0. Offline surgery — no boot.",""],
+["keys / vboot-keys / pcr-keys","keys","once","Generates the three dev hierarchies under gitignored secrets/.","Separate roles: sb signer · vboot · PCR-policy key."],
+["device","build","sign, enroll","Assembles the installed-device disk image: ESP + slot A + blank FIREARC_DATA.","Factory image — per-device state comes next."],
+["check-boot","gates","device","Boots the disk in QEMU and asserts the integrity gate outcome.","Fail-closed expected: tamper ⇒ poweroff."],
+["check-secure-boot","gates","enrolled flash","Signed chain boots; tampered/modified/loader-tampered variants refused; store survives.",""],
+["check-firmware-vboot","gates","firmware-sign","Signed RW executes; tampered and attacker-keyed RW refused pre-payload.",""],
+["check-initrd","gates","initrd","Asserts the exact early-boot tool set (cryptenroll, cryptsetup, dd, TPM2 plugin).","No crypt modules — audit is explicit."],
+["check-rootfs","gates","root","Verifies the frozen root image and verity geometry.",""],
+["device-provision","dev","device stage","Creates (or --replace) a persistent profile: disk + flash copy + isolated swtpm + LUKS2 volume + recovery credential.","Never resets silently. Unique per device."],
+["data-enroll","dev","provisioned, pcr-keys","One TPM2 enrollment session (see diagram above). ~40 s.","Interrupted sessions are adopted, not wedged."],
+["device-boot","dev","provisioned","Cold-start N times; asserts markers, TPM TIS/ACPI, write confinement, flash/TPM/data identity continuity.","Headless — evidence in runs/NNNN/serial.log."],
+["./scripts/boot-live &lt;name&gt;","dev","provisioned","Raw QEMU with the serial console on your terminal (throwaway state copy).","Ctrl-A X to quit. Live console for humans."],
+["device-reboot","dev","running","Warm reset inside one powered session; ends on a verified boot.","Flash/TPM stay powered through resets."],
+["device-stop","dev","running","QMP ACPI powerdown after the boot marker.","Orderly shutdown."],
+["device-powercut","dev","running","SIGKILL QEMU + swtpm after a verified boot. Hard power loss.","For power-loss studies."],
+["device-snapshot / device-restore","dev","—","Copy / explicitly restore the whole persistent state.","Immutable snapshots."],
+["prune","maint","—","Deletes superseded stage evidence. Current stage dirs always stay.","--keep N to retain history."],
+["status / doctor","maint","—","Stage table / environment sanity.",""],
+["verify-inputs","maint","—","Re-checks every pin: digests, signatures, upstream metadata.","Part of just check."],
+["secrets","maint","—","Asserts the dev key hierarchy exists and nothing leaked into the tree.",""],
+["test","maint","—","243 offline unit tests (~10 s).","No network, no builds."],
+["sbom","maint","build-root","CycloneDX inventory of the locked package closure.",""],
+["clean","maint","explicit confirm","Removes build outputs. Source and secrets untouched.",""],
+["reproduce","maint","—","Rebuilds from pins in a fresh tree and compares digests.","The reproducibility proof."],
+];
+const GROUPS={"build":1,"keys":2,"gates":3,"dev":4,"maint":5};
+function row(c){return `<tr><td><span class="cmd">just ${c[0]}</span></td><td>${c[2]}</td><td>${c[3]}${c[4]?'<div class="small" style="color:var(--warn)">⚠ '+c[4]+'</div>':''}</td></tr>`}
+function fill(){
+ const q=(document.getElementById('cmdfilter').value||'').toLowerCase();
+ for(const g of ["all","build","keys","gates","dev","maint"]){
+   const list=CMDS.filter(c=>(g==="all"||c[1]===g)&&(!q||(c[0]+c[2]+c[3]+c[4]).toLowerCase().includes(q)));
+   document.getElementById('p-'+g).innerHTML=list.length?
+    `<table><tr><th style="width:280px">command</th><th style="width:170px">needs</th><th>what it does</th></tr>${list.map(row).join('')}</table>`
+    :'<p class="dim small">no match</p>';
+ }
+}
+document.getElementById('cmdtabs').addEventListener('click',e=>{
+ const t=e.target.closest('.tab');if(!t)return;
+ document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('active',x===t));
+ document.querySelectorAll('.panel').forEach(p=>p.classList.toggle('show',p.id===t.dataset.p));
+});
+document.getElementById('cmdfilter').addEventListener('input',fill);
+fill();
+</script>
+
+<h3>Typical sessions</h3>
+<pre>
+# first time on this machine
+just bootstrap && just build && just keys && just vboot-keys && just pcr-keys \
+  && just firmware-sign && just enroll && just verify-build
+
+# qualify the chain (the gates)
+just check-firmware-vboot && just check-secure-boot && just check-boot
+
+# make a device and bring up its data volume
+just device-provision --name devA        # disk + flash + swtpm + LUKS2 + recovery credential
+just data-enroll --name devA             # TPM2 token (PCR 7 + signed PCR 11), in-boot validation
+just device-boot --name devA --count 3   # three cold starts, all markers + identity asserted
+
+# watch it with your own eyes
+./scripts/boot-live devA
+
+# clean disk after experiments
+just prune --keep 0
+</pre>
+
+<!-- ============================================================ HARDWARE -->
+<h2>4 · Moving to real hardware — what changes, what ODMs must deliver</h2>
+<p>The QEMU chain relies on a <b>host</b> that checks the flash digest. Real hardware has no host. Everything below replaces that anchor and the emulator conveniences.</p>
+
+<div class="grid g2">
+<div class="card">
+<h3><span class="tag bad">REPLACE</span> Root of trust</h3>
+<ul class="small">
+<li><span class="req">Required:</span> Intel <b>Boot Guard</b> with FireArc-owned fused key (OEM/BTG profile), <b>or</b> coreboot RO in SPI with hardware write-protection (<b>PR0/PRR</b> set at provisioning)</li>
+<li>Without one of these, "verified RW" has no anchor — do not ship</li>
+<li>Verify protection empirically on the board: write-protect bits read back, external SPI flash attempts fail</li>
+</ul>
+</div>
+<div class="card">
+<h3><span class="tag bad">REPLACE</span> Secure Boot keys</h3>
+<ul class="small">
+<li>Enroll FireArc-owned <b>PK/KEK/db/dbx</b> (today: dev enrollment on Dasharo defaults)</li>
+<li>PK private key stays offline; db rotation via KEK-signed update; dbx policy from day one</li>
+<li><b>PCR 7 changes on re-enrollment</b> ⇒ staged measurement-policy transition before any key rotation (Phase 10 item 6)</li>
+</ul>
+</div>
+<div class="card">
+<h3><span class="tag bad">REPLACE</span> swtpm → discrete TPM 2.0</h3>
+<ul class="small">
+<li><span class="req">Required:</span> dTPM 2.0 (rev ≥1.38), SHA-256 bank, <b>TIS or CRB</b> interface, NV + PCR state surviving power loss</li>
+<li>Identity is permanent — no state-copy rescue; TPM clear/replacement must break unlock (it does by design)</li>
+<li>Anti-rollback needs a monotonic counter — allocate TPM NV index early</li>
+<li>Avoid fTPM unless its attestation properties are accepted in the threat model</li>
+</ul>
+</div>
+<div class="card">
+<h3><span class="tag bad">REPLACE</span> Firmware updates</h3>
+<ul class="small">
+<li>UEFI <b>capsule</b> (signed) or signed coreboot updater — whatever the pinned coreboot/EDK II actually supports</li>
+<li>Must preserve SMMSTORE/NVRAM across updates; A/B firmware or a firmware rollback index</li>
+<li>Never overwrite a complete flash image in place — stage, verify, switch (same rule as the OS)</li>
+</ul>
+</div>
+<div class="card">
+<h3><span class="tag warn">CHECK</span> Board minimums</h3>
+<ul class="small">
+<li>CPU: x86-64 with <b>AES-NI</b> (LUKS2 xts), NX, SMAP; Intel NICs (i225/i226/i350/X550 class) — <b>no Realtek</b> for the data plane</li>
+<li>RAM ≥ 8 GB · storage ≥ 32 GB (matches the GPT layout: ESP 1G, root A/B 4G + 128M hash each, data = remainder)</li>
+<li><b>UART header</b> for manufacturing/recovery console; SPI flash external programming header or dual-BIOS switch</li>
+<li>TCO watchdog for hang recovery; RTC battery for monotonic time</li>
+<li>coreboot board support must emit the <b>TPM2 event log</b> (log area reserved) so the PCR replay tool works unchanged</li>
+</ul>
+</div>
+<div class="card">
+<h3><span class="tag warn">CHECK</span> Flash &amp; boot flow</h3>
+<ul class="small">
+<li>SPI descriptor locks + SMM variable-store protection verified in tests (BIOSWE/BLE bits)</li>
+<li>Disable EFI shell, network boot, option ROMs, external boot in the release profile — keep USB boot manufacturing-only via policy toggle</li>
+<li>Board AGESA/microcode updates change PCRs 0–3 — version them in the measurement policy</li>
+</ul>
+</div>
+<div class="card">
+<h3><span class="tag info">PROCESS</span> Manufacturing</h3>
+<ul class="small">
+<li>Provisioning station: per-device LUKS2 + TPM enrollment at factory, <b>two-person control</b> for the recovery credential escrow (item 7 decision pending)</li>
+<li>Audit trail per device: serial ↔ disk UUID ↔ TPM EK/AK ↔ escrow record</li>
+<li>Rehearse escrow recovery + credential rotation on isolated clones before field units exist (items 14–15)</li>
+</ul>
+</div>
+<div class="card">
+<h3><span class="tag info">PROCESS</span> Qualification deltas</h3>
+<ul class="small">
+<li>Power-loss campaign: real brown-outs/relay cuts during update + boot (500-cycle, PDF G-target)</li>
+<li>Every QEMU test (tamper, transplant, tamper-EIO, gates) re-run on hardware — swtpm state copies must <b>not</b> migrate as production identities</li>
+<li>Fresh hardware TPM identities; re-run the full move/refusal matrix on real boards</li>
+</ul>
+</div>
+</div>
+
+<h3>Still missing before any of that (current gaps)</h3>
+<ul class="small">
+<li>FireArc-owned PK/KEK/db + dbx policy · A/B slots + boot counting + fallback (Phase 4) · bounded recovery interface (Phase 9)</li>
+<li>Firmware update + trust rotation (Phase 10) · RAUC OS updates (Phase 6) · health checks/auto-rollback (Phase 7)</li>
+<li>Escrow custody path (Phase 5 item 7 — owner decision pending)</li>
+</ul>
+
+<footer>
+FireArc development trust domain — evidence: docs/validation/*.md, ADRs 0001–0011, build/devices/&lt;name&gt;/runs/NNNN/.
+This page: docs/bootchain-guide.html · self-contained, no external resources.
+</footer>
+</div>
+</body>
+</html>

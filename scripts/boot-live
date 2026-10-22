@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Live-console boot of a device profile: raw QEMU with the serial console on
+# YOUR terminal (Ctrl-A then X to exit). Boots a throwaway copy of the
+# profile state (flash/disk/TPM) so the recorded profile's continuity
+# assertions are never disturbed by out-of-band boots.
+set -euo pipefail
+name="${1:?usage: scripts/boot-live <device-name> [snapshot-name]}"
+root="$(cd "$(dirname "$0")/.." && pwd)"
+profile="$root/build/devices/$name"
+[ -d "$profile" ] || { echo "no such profile: $name" >&2; exit 1; }
+
+scratch="$(mktemp -d "$root/build/.live-$name.XXXXXX")"
+# Only the tiny TPM state needs a writable copy: QEMU -snapshot overlays all
+# drives (disk, pflash) onto temp files, so the profile's big artifacts are
+# never copied and never written.
+cp -a "$profile/tpm" "$scratch/tpm"
+
+swtpm socket --tpmstate dir="$scratch/tpm" \
+  --ctrl type=unixio,path="$scratch/swtpm.sock" \
+  --log file="$scratch/swtpm.log,level=1" --daemon --terminate
+
+trap 'rm -rf "$scratch"' EXIT
+echo "== live console for $name (state copy in $scratch) =="
+echo "== Ctrl-A then X quits the machine =="
+exec qemu-system-x86_64 \
+  -machine q35 -accel kvm -cpu max -m 2048 \
+  -nodefaults -display none -net none -no-reboot -snapshot \
+  -serial mon:stdio \
+  -drive if=pflash,format=raw,file="$profile/flash.rom" \
+  -device ahci,id=ahci0 \
+  -drive if=none,id=disk0,file="$profile/disk.raw",format=raw \
+  -device ide-hd,drive=disk0,bus=ahci0.0 \
+  -chardev socket,id=chrtpm,path="$scratch/swtpm.sock" \
+  -tpmdev emulator,id=tpm0,chardev=chrtpm \
+  -device tpm-tis,tpmdev=tpm0
