@@ -77,7 +77,7 @@ def section_carries(binary, section, content):
     return raw.startswith(content) and not raw[len(content):].strip(b"\0")
 
 
-def build(root, tools_label, root_label, rootfs_label, label):
+def build(root, tools_label, root_label, rootfs_label, label, *, shell=False):
     """Build the unsigned slot-A UKI from frozen, verified stage outputs."""
     builder.verify_tools(root, tools_label)
     _, root_output, _ = device._stage_outputs(root, root_label, "appliance-root")
@@ -126,7 +126,7 @@ def build(root, tools_label, root_label, rootfs_label, label):
         (staging / "cmdline").write_text(device.KERNEL_CMDLINE)
         # The dev cpio (verity authority + development unit) becomes part of
         # the .initrd section: inside the file the signing step will sign.
-        (work / "dev.cpio").write_bytes(device.dev_cpio(authority))
+        (work / "dev.cpio").write_bytes(device.dev_cpio(authority, shell=shell))
         with initrd.open("rb") as source, (staging / "initrd.img").open("xb") as target:
             shutil.copyfileobj(source, target, 16 * 1024 * 1024)
             target.write(b"\0" * segment_padding(initrd.stat().st_size))
@@ -173,6 +173,7 @@ def build(root, tools_label, root_label, rootfs_label, label):
             published[name] = sha256(output / name)
         write_json(work / "uki.json", {
             "schema": 1, "uki": device.UKI_ARTIFACT, "slot": "A",
+            "development_shell": shell,
             "uname": release, "cmdline": device.KERNEL_CMDLINE,
             "pe_timestamp": f"{timestamp:#x}", "sections": sections,
             "ukify": version, "tools_image": image,

@@ -27,7 +27,6 @@ import shlex
 import subprocess
 import sys
 import time
-import time
 
 from . import builder, firmware_layout, qmp, rootfs
 from .inputs import load_lock
@@ -135,13 +134,47 @@ StandardError=journal+console
 ExecStart=/bin/sh -c 'echo FIREARC_TPM_DEBUG_CLASS=$(ls /sys/class 2>/dev/null | grep -i tpm); echo FIREARC_TPM_DEBUG_TPM0=$(ls /sys/class/tpm/tpm0 2>&1); echo FIREARC_TPM_DEBUG_VERSION=$(cat /sys/class/tpm/tpm0/tpm_version_major 2>&1); echo FIREARC_TPM_DEBUG_DEV=$(ls /dev/tpm0 /dev/tpmrm0 2>&1); if [ -c /dev/tpm0 ] && [ -d /sys/class/tpm/tpm0 ] && [ "$(cat /sys/class/tpm/tpm0/tpm_version_major 2>/dev/null)" = "2" ]; then echo FIREARC_TPM_TIS_OK > /dev/console; else echo FIREARC_TPM_TIS_MISSING > /dev/console; fi; if grep -Eq " /sysroot ext4 ro(,| )" /proc/mounts; then echo FIREARC_DEV_BOOT_OK > /dev/console; echo FIREARC_DEV_BOOT_OK > /dev/console; else echo FIREARC_DEV_BOOT_MISSING > /dev/console; fi; echo FIREARC_PCR_DUMP_BEGIN > /dev/console; mkdir -p /sys/kernel/security; mount -t securityfs securityfs /sys/kernel/security 2>/dev/null; od -An -v -tx1 /sys/kernel/security/tpm0/binary_bios_measurements > /dev/ttyS0; echo FIREARC_PCR_DUMP_END > /dev/console; sleep 6; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null; rterr=$(cat /dev/mapper/firearc-root 2>&1 > /dev/null); case "$rterr" in *"Input/output error"*) echo FIREARC_RUNTIME_CORRUPT_EIO > /dev/console;; *) echo FIREARC_RUNTIME_READ_CLEAN > /dev/console;; esac; sleep 600'
 """
 
+# Separate signed development image only. Normal UKIs never contain a shell
+# service. systemd owns the chroot/API mounts and the serial controlling TTY;
+# Bash runs from the verified Debian root, not the initramfs.
+SHELL_UNIT = """[Unit]
+Description=FireArc DEVELOPMENT root shell (disposable VM)
+DefaultDependencies=no
+Requires=sysroot.mount firearc-data-mount.service
+After=sysroot.mount firearc-data-mount.service
+Before=initrd.target
+OnFailure=firearc-boot-failure.service
+
+[Service]
+Type=oneshot
+RootDirectory=/sysroot
+WorkingDirectory=/
+MountAPIVFS=yes
+BindPaths=/dev /run
+TemporaryFileSystem=/tmp:rw,nosuid,nodev,mode=1777
+# /run exposes this VM's initrd manager. Permit systemctl from the verified
+# chroot to request shutdown instead of silently ignoring the command.
+Environment=HOME=/root HISTFILE=/dev/null TERM=vt100 SYSTEMD_IGNORE_CHROOT=1 "PS1=firearc# "
+StandardInput=tty-force
+StandardOutput=tty
+StandardError=tty
+TTYPath=/dev/ttyS0
+TTYReset=yes
+TTYVHangup=yes
+ExecStartPre=/usr/bin/printf '\\nFireArc DEVELOPMENT shell: verified read-only Debian root; temporary VM state.\\nExit powers off. Ctrl-A then X exits QEMU.\\n'
+ExecStart=/bin/bash --noprofile --norc -i
+# Keep initrd.target blocked until the poweroff transaction stops this unit;
+# finishing the oneshot would race switch-root against shutdown.
+ExecStart=/usr/bin/systemctl --no-block poweroff
+ExecStart=/usr/bin/sleep infinity
+TimeoutStartSec=infinity
+"""
+
 LOADER_CONF = "timeout 0\ndefault firearc-a\neditor no\n"
 
-# Console contract for the TPM2 data volume (Phase 5 item 8+). The probe
-# runs at every boot after the enter-initrd phase: with an enrolled token it
-# attempts the unattended TPM2 unlock (and detaches again — the sealed region
-# is identity, never scratch), and reports refusal honestly. The enrollment
-# unit runs only when its one-shot transport disk is attached.
+# Console contract for TPM2 data (Phase 5 items 8-10). The crypttab/mount
+# gate reports the real unlock outcome; the development probe only observes
+# the mounted mapper. Enrollment requires the one-shot transport disk.
 DATA_UNLOCK_OK_MARKER = "FIREARC_DATA_UNLOCK_OK"
 DATA_UNLOCK_REFUSED_MARKER = "FIREARC_DATA_UNLOCK_REFUSED"
 DATA_TOKEN_ABSENT_MARKER = "FIREARC_DATA_TOKEN_ABSENT"
@@ -152,18 +185,88 @@ DATA_ENROLL_OK_MARKER = "FIREARC_DATA_ENROLL_OK"
 DATA_ENROLL_FAIL_MARKER = "FIREARC_DATA_ENROLL_FAIL"
 DATA_ENROLL_ALREADY_MARKER = "FIREARC_DATA_ENROLL_ALREADY"
 DATA_ENROLL_DISK_ABSENT_MARKER = "FIREARC_ENROLL_DISK_ABSENT"
+# Item 10: the data filesystem must be mounted from the unlocked volume —
+# MOUNT_OK is required on every enrolled boot; MOUNT_MISSING is fatal.
+DATA_MOUNT_OK_MARKER = "FIREARC_DATA_MOUNT_OK"
+DATA_MOUNT_MISSING_MARKER = "FIREARC_DATA_MOUNT_MISSING"
+# Item 10: the filesystem is born exactly once, at the one-shot enrollment
+# session (the same privileged guest event that seals the volume).
+DATA_MKFS_OK_MARKER = "FIREARC_DATA_MKFS_OK"
+DATA_MKFS_FAIL_MARKER = "FIREARC_DATA_MKFS_FAIL"
 DATA_ENROLL_NO_PCRSIG_MARKER = "FIREARC_DATA_ENROLL_NO_PCRSIG"
 
-# The unlock probe: explicit, never an automatic crypttab path. Ordering
-# encodes the PLAN item 10 rule ahead of its time: unlock attempts happen
-# only after the root integrity gate (sysroot.mount) and the enter-initrd
-# PCR phase the signed policy pins. systemd-stub 257 exposes the UKI's
-# .pcrsig/.pcrpkey sections in the initrd under /.extra/ (v254+ layout).
+# Item 9+10 configuration: crypttab is the supported unlock configuration,
+# read by the pinned systemd-cryptsetup generator into
+# systemd-cryptsetup@firearc\x2ddata.service. noauto: only the FireArc gate
+# below starts it (no dracut automatic path); nofail: a factory disk without
+# a LUKS2 header never aborts the boot; headless: a failed token unlock is
+# an immediate failure, never an interactive password prompt. The signature
+# and public key for the signed PCR 11 policy are auto-discovered from the
+# systemd-stub /.extra/ directory (same mechanism the probe relied on).
+DATA_CRYPTTAB = ("firearc-data /dev/disk/by-partlabel/FIREARC_DATA - "
+                 "noauto,nofail,tpm2-device=auto,headless\n")
+
+# Unlock ordering (item 10): strictly after the measured enter-initrd phase
+# (the phase word must already be extended into PCR 11 before PolicyPCR is
+# evaluated) and after the verified read-only sysroot is mounted — root
+# integrity is checked before any data-volume secret is unsealed.
+CRYPTSETUP_ORDERING_DROPIN = """[Unit]
+Requires=sysroot.mount systemd-pcrphase-initrd.service firearc-data-enroll.service
+After=systemd-pcrphase-initrd.service firearc-data-enroll.service sysroot.mount
+
+[Service]
+TimeoutStartSec=120
+"""
+
+DATA_FILESYSTEM_MOUNT = """[Unit]
+Description=FireArc encrypted persistent data
+DefaultDependencies=no
+Requires=sysroot.mount systemd-cryptsetup@firearc\\x2ddata.service
+After=sysroot.mount systemd-cryptsetup@firearc\\x2ddata.service
+Before=initrd.target
+
+[Mount]
+What=/dev/mapper/firearc-data
+Where=/sysroot/data
+Type=ext4
+Options=rw,noexec,nodev,nosuid
+TimeoutSec=30
+"""
+
+# The unlock-and-mount gate (items 9+10): starts the crypttab-generated
+# systemd-cryptsetup unit, and for an enrolled volume requires the mapper and
+# a real ext4 mount at /sysroot/data before the boot may continue. Failure on
+# an enrolled device is fatal (required unit, exit 1) — a refused unlock must
+# never become a silent fallback or reset (G5). A factory disk or a
+# provisioned-but-not-yet-enrolled volume reports TOKEN_ABSENT and passes:
+# nothing writes secrets anywhere in that state, and /data simply does not
+# exist yet.
+DATA_MOUNT_UNIT = """[Unit]
+Description=FireArc crypttab data unlock and /data mount gate
+DefaultDependencies=no
+Requires=sysroot.mount systemd-pcrphase-initrd.service firearc-data-enroll.service
+After=systemd-pcrphase-initrd.service firearc-data-enroll.service sysroot.mount
+Before=initrd.target
+OnFailure=firearc-boot-failure.service
+
+[Service]
+Type=oneshot
+StandardInput=null
+StandardOutput=journal+console
+StandardError=journal+console
+ExecStart=/usr/lib/firearc/data-mount
+TimeoutStartSec=180
+RemainAfterExit=yes
+"""
+
+# Observation-only probe (serial contract for the harness): reports the
+# header state and the production unlock/mount outcome. It never unlocks by
+# itself — the crypttab-driven gate owns the real attach — so a boot reports
+# exactly one unlock attempt against the TPM.
 DATA_PROBE_UNIT = """[Unit]
 Description=FireArc development TPM2 data-unlock probe
 DefaultDependencies=no
-After=systemd-pcrphase-initrd.service firearc-data-enroll.service
-After=sysroot.mount
+After=systemd-pcrphase-initrd.service firearc-data-enroll.service firearc-data-mount.service sysroot.mount
 Before=initrd.target
 
 [Service]
@@ -171,29 +274,26 @@ Type=oneshot
 StandardInput=null
 StandardOutput=journal+console
 StandardError=journal+console
-ExecStart=/bin/sh -c 'i=0; while [ ! -e /dev/disk/by-partlabel/FIREARC_DATA ] && [ $i -lt 150 ]; do sleep 0.2; i=$((i+1)); done; if [ ! -e /dev/disk/by-partlabel/FIREARC_DATA ]; then echo FIREARC_DATA_PROBE_NO_DISK > /dev/console; elif [ ! -e /dev/tpmrm0 ]; then echo FIREARC_DATA_PROBE_NO_TPM > /dev/console; elif [ ! -e /.extra/tpm2-pcr-signature.json ] || [ ! -e /.extra/tpm2-pcr-public-key.pem ]; then echo FIREARC_DATA_PCRSIG_MISSING > /dev/console; else cryptsetup luksDump --dump-json-metadata /dev/disk/by-partlabel/FIREARC_DATA > /run/data-header.json 2>/run/data-header.err; echo FIREARC_PROBE_LUKSDUMP_RC=$? > /dev/console; echo FIREARC_PROBE_LUKSDUMP_TOKENS=$(grep -c systemd-tpm2 /run/data-header.json) > /dev/console; grep -q systemd-tpm2 /run/data-header.json; if [ $? -eq 0 ]; then if timeout 120 systemd-cryptsetup attach firearc-data /dev/disk/by-partlabel/FIREARC_DATA - tpm2-device=auto > /dev/console 2>&1; then echo FIREARC_DATA_UNLOCK_OK > /dev/console; systemd-cryptsetup detach firearc-data > /dev/console 2>&1; else echo FIREARC_DATA_UNLOCK_REFUSED > /dev/console; fi; else echo FIREARC_DATA_TOKEN_ABSENT > /dev/console; fi; fi'
+ExecStart=/bin/sh -c 'if [ -e /dev/mapper/firearc-data ]; then grep -q "^/dev/mapper/firearc-data /sysroot/data ext4 " /proc/mounts; fi'
 """
 
-# One-shot TPM2 enrollment: gated on the presence of the enrollment
-# transport (the FIREARC-ENROLL-KEY magic on /dev/sdb), unlocked with the
-# recovery credential read from that disk, and enrolled with explicit PCR 7
-# binding plus the signed PCR 11 policy the UKI carries (.pcrsig/.pcrpkey
-# exposed by systemd-stub under /.extra/, v254+ layout). The credential file
-# is overwritten and removed immediately after use; serial output never
-# contains it.
 DATA_ENROLL_UNIT = """[Unit]
 Description=FireArc development TPM2 data enrollment
 DefaultDependencies=no
+Requires=sysroot.mount systemd-pcrphase-initrd.service
 After=systemd-pcrphase-initrd.service
 After=sysroot.mount
 Before=initrd.target
+OnFailure=firearc-boot-failure.service
 
 [Service]
 Type=oneshot
 StandardInput=null
 StandardOutput=journal+console
 StandardError=journal+console
-ExecStart=/bin/sh -c 'if [ "$(dd if=/dev/sdb bs=32 count=1 2>/dev/null)" != "FIREARC-ENROLL-KEY-V1" ]; then echo FIREARC_ENROLL_DISK_ABSENT > /dev/console; elif [ ! -e /dev/tpmrm0 ]; then echo FIREARC_DATA_ENROLL_FAIL > /dev/console; elif cryptsetup luksDump --dump-json-metadata /dev/disk/by-partlabel/FIREARC_DATA 2>/dev/null | grep -q systemd-tpm2; then echo FIREARC_DATA_ENROLL_ALREADY > /dev/console; elif [ ! -e /.extra/tpm2-pcr-signature.json ] || [ ! -e /.extra/tpm2-pcr-public-key.pem ]; then echo FIREARC_DATA_ENROLL_NO_PCRSIG > /dev/console; else dd if=/dev/sdb of=/run/firearc-recovery.key bs=32 skip=1 count=1 2>/dev/null; chmod 600 /run/firearc-recovery.key; tpm2_pcrread sha256:7,11 > /dev/console 2>&1; if timeout 120 systemd-cryptenroll --tpm2-device=/dev/tpmrm0 --tpm2-pcrs=7 --tpm2-public-key=/.extra/tpm2-pcr-public-key.pem --tpm2-public-key-pcrs=11 --tpm2-signature=/.extra/tpm2-pcr-signature.json --unlock-key-file=/run/firearc-recovery.key /dev/disk/by-partlabel/FIREARC_DATA > /dev/console 2>&1; then echo FIREARC_DATA_ENROLL_OK > /dev/console; else echo FIREARC_DATA_ENROLL_FAIL > /dev/console; fi; dd if=/dev/urandom of=/run/firearc-recovery.key bs=32 count=1 2>/dev/null; rm -f /run/firearc-recovery.key; fi'
+ExecStart=/usr/lib/firearc/data-enroll
+TimeoutStartSec=300
+RemainAfterExit=yes
 """
 
 # With one UKI under EFI/Linux and timeout 0, systemd-boot boots the single
@@ -243,8 +343,8 @@ def cpio_archive(entries):
     return bytes(payload)
 
 
-def dev_cpio(authority):
-    """Authority plus an explicit development poweroff switch, never shipped."""
+def dev_cpio(authority, *, shell=False):
+    """Signed authority and development terminal; shell is an explicit variant."""
     text = rootfs.render_initrd_authority(authority, "A")
     if re.search(r"[^a-zA-Z0-9_=\n]", text):
         raise SafetyError("Rendered authority contains characters the gate parser rejects")
@@ -254,14 +354,26 @@ def dev_cpio(authority):
         ("etc/firearc/verity.authority", 0o0100644, text.encode()),
         ("etc/systemd", 0o040755, b""),
         ("etc/systemd/system", 0o040755, b""),
-        ("etc/systemd/system/firearc-dev-done.service", 0o0100644, DEV_UNIT.encode()),
-        # TPM2 data volume units (Phase 5 item 8+): the probe runs at every
-        # boot, the enrollment unit only when its transport disk is present.
-        # The probe is required (its marker is part of the boot contract);
-        # the enrollment unit is conditional tooling that exits immediately
-        # when the transport is absent.
+        ("etc/systemd/system/firearc-dev-done.service", 0o0100644,
+         (SHELL_UNIT if shell else DEV_UNIT).encode()),
+        # TPM2 data volume files (Phase 5 items 8-10): crypttab is the
+        # supported unlock configuration (read by the pinned generator into a
+        # unit our mount gate starts, ordered after the root gate and the
+        # measured initrd phase); the mount gate performs the required
+        # unlock-and-mount on enrolled volumes; the probe is the
+        # observation-only serial contract; the enrollment unit (with the
+        # one-shot ext4 birth) only acts when its transport disk is present.
         ("etc/systemd/system/firearc-data-probe.service", 0o0100644,
          DATA_PROBE_UNIT.encode()),
+        ("etc/crypttab", 0o0100644, DATA_CRYPTTAB.encode()),
+        ("etc/systemd/system/systemd-cryptsetup@firearc\\x2ddata.service.d",
+         0o040755, b""),
+        ("etc/systemd/system/systemd-cryptsetup@firearc\\x2ddata.service.d/10-firearc-ordering.conf",
+         0o0100644, CRYPTSETUP_ORDERING_DROPIN.encode()),
+        ("etc/systemd/system/firearc-data-mount.service", 0o0100644,
+         DATA_MOUNT_UNIT.encode()),
+        ("etc/systemd/system/sysroot-data.mount", 0o0100644,
+         DATA_FILESYSTEM_MOUNT.encode()),
         ("etc/systemd/system/firearc-data-enroll.service", 0o0100644,
          DATA_ENROLL_UNIT.encode()),
         # requires (not wants): initrd.target — and therefore switch_root —
@@ -272,6 +384,8 @@ def dev_cpio(authority):
          0o0120777, b"../firearc-dev-done.service"),
         ("etc/systemd/system/initrd.target.requires/firearc-data-probe.service",
          0o0120777, b"../firearc-data-probe.service"),
+        ("etc/systemd/system/initrd.target.requires/firearc-data-mount.service",
+         0o0120777, b"../firearc-data-mount.service"),
         # The enrollment unit runs on every boot too, but exits immediately
         # (with an explicit serial marker) when its one-shot transport disk
         # is absent; keeping it required means a machine with an attached
@@ -310,12 +424,16 @@ def sfdisk_script():
 
 
 def qemu_command(firmware, disk, serial, *, kvm, tpm=None, qmp_socket=None, rebootable=False,
-                 enroll_disk=None):
+                 enroll_disk=None, interactive=False):
     # The payload has no virtio drivers: the development disk is presented
     # over the emulated ICH9 AHCI controller the payload does support.
     command = ["qemu-system-x86_64", "-machine", "q35", "-accel", "kvm" if kvm else "tcg",
                "-cpu", "max", "-m", "2048", "-nodefaults", "-display", "none",
-               "-net", "none", "-serial", f"file:{serial}"]
+               "-net", "none", "-serial", "mon:stdio" if interactive else f"file:{serial}"]
+    if interactive:
+        # Never let a console session write into receipt-covered factory disks
+        # or firmware. QEMU overlays ALL drives, including monolithic pflash.
+        command += ["-snapshot"]
     # Reset loops must exit instead of spinning forever — unless the operator
     # explicitly runs a reboot operation, which needs in-process resets.
     if not rebootable:
@@ -338,7 +456,7 @@ def qemu_command(firmware, disk, serial, *, kvm, tpm=None, qmp_socket=None, rebo
         # (second port of the same AHCI bus); attached only for the single
         # enrollment session, never for ordinary boots.
         command += ["-drive", f"if=none,id=enroll0,file={enroll_disk},format=raw",
-                    "-device", "ide-hd,drive=enroll0,bus=ahci0.1"]
+                    "-device", "ide-hd,drive=enroll0,bus=ahci0.1,serial=FIREARC_ENROLL_V1"]
     if tpm:
         # Exactly one emulated TPM per machine, over the ISA TIS interface,
         # backed by the device profile's isolated swtpm control socket.
@@ -371,16 +489,19 @@ class VmSession:
         self._err = None
         self.deadline = 0.0
 
-    def start(self, serial_path):
+    def start(self, serial_path, *, interactive=False):
         write_json(self.work / (self.name + ".command.json"), self.command)
         self.serial_path = serial_path
         accel = "kvm" if "kvm" in self.command else "tcg"
-        print(f"  \u25b8 {self.name}: QEMU booting ({accel}), serial -> {serial_path.parent.name}/{serial_path.name}\n"
+        console = "your terminal" if interactive else f"{serial_path.parent.name}/{serial_path.name}"
+        print(f"  \u25b8 {self.name}: QEMU booting ({accel}), serial -> {console}\n"
               f"    $ {shlex.join(self.command)}", file=sys.stderr, flush=True)
         self.started = time.monotonic()
-        self._out = (self.work / (self.name + ".stdout")).open("xb")
-        self._err = (self.work / (self.name + ".stderr")).open("xb")
-        self.process = subprocess.Popen(self.command, stdin=subprocess.DEVNULL,
+        if not interactive:
+            self._out = (self.work / (self.name + ".stdout")).open("xb")
+            self._err = (self.work / (self.name + ".stderr")).open("xb")
+        self.process = subprocess.Popen(self.command,
+                                        stdin=None if interactive else subprocess.DEVNULL,
                                         stdout=self._out, stderr=self._err,
                                         preexec_fn=die_with_parent)
         self.deadline = time.monotonic() + self.timeout
@@ -512,7 +633,7 @@ class VmSession:
 
 
 def start_vm(work, name, *, flash, disk, serial, kvm, tpm=None, rebootable=False,
-             timeout=1800, enroll_disk=None):
+             timeout=1800, enroll_disk=None, interactive=False):
     """Start one QEMU machine under QMP control inside an evidence directory."""
     socket_path = work / (name + ".qmp.sock")
     if len(str(socket_path).encode()) >= 108:
@@ -520,11 +641,22 @@ def start_vm(work, name, *, flash, disk, serial, kvm, tpm=None, rebootable=False
         # instead of QEMU's cryptic rc=1. Keep session labels short.
         raise SafetyError(f"QMP socket path too long for a UNIX socket "
                           f"(>=108 bytes): {socket_path}")
-    return VmSession(work, name,
-                     qemu_command(flash, disk, serial, kvm=kvm, tpm=tpm,
-                                  qmp_socket=socket_path, rebootable=rebootable,
-                                  enroll_disk=enroll_disk),
-                     socket_path, timeout=timeout).start(serial)
+    session = VmSession(work, name,
+                        qemu_command(flash, disk, serial, kvm=kvm, tpm=tpm,
+                                     qmp_socket=socket_path, rebootable=rebootable,
+                                     enroll_disk=enroll_disk, interactive=interactive),
+                        socket_path, timeout=timeout)
+    try:
+        return session.start(serial, interactive=interactive)
+    except BaseException:
+        # A failed QMP connection or interrupted startup must not strand QEMU
+        # (and consequently swtpm) while the caller cleans its state directory.
+        try:
+            if session.process is not None:
+                session.kill()
+        finally:
+            session.close()
+        raise
 
 
 def boot_verdict(serial_text):

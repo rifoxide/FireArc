@@ -7,10 +7,13 @@ installkernel() {
 }
 
 install() {
-    inst_multiple veritysetup blkid lsblk blockdev stat grep od tr sed cat udevadm sleep
+    inst_multiple veritysetup blkid lsblk blockdev stat grep od tr sed cat cmp udevadm sleep
     inst_simple "$moddir/authority.sh" /usr/lib/firearc/authority.sh
     inst_script "$moddir/firearc-verify-root" /usr/lib/firearc/verify-root
     chmod 0755 "$initdir/usr/lib/firearc/verify-root"
+    inst_script "$moddir/firearc-data-enroll" /usr/lib/firearc/data-enroll
+    inst_script "$moddir/firearc-data-mount" /usr/lib/firearc/data-mount
+    chmod 0755 "$initdir/usr/lib/firearc/data-enroll" "$initdir/usr/lib/firearc/data-mount"
     local unit generator
     for unit in firearc-verify-root.service firearc-boot-failure.service sysroot.mount emergency.target; do
         inst_simple "$moddir/$unit" "/etc/systemd/system/$unit"

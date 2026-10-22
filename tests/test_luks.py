@@ -207,6 +207,16 @@ def enrolled_header(pem):
 
 
 class EnrollTests(unittest.TestCase):
+    def test_filesystem_birth_requires_explicit_transport_grant(self):
+        with temporary() as work:
+            blob = luks.build_enroll_disk(work / "initial.img", b"R" * 32,
+                                          initialize_filesystem=True)
+            self.assertEqual(len(blob), luks.ENROLL_DISK_BYTES)
+            self.assertEqual(blob[32:64], b"R" * 32)
+            self.assertEqual(blob[64:96], luks.ENROLL_FORMAT_MAGIC.ljust(32, b"\0"))
+            retry = luks.build_enroll_disk(work / "retry.img", b"R" * 32)
+            self.assertNotIn(luks.ENROLL_FORMAT_MAGIC, retry)
+
     def test_enroll_disk_carries_magic_then_credential(self):
         with temporary() as work:
             path = work / "enroll-key.img"

@@ -64,11 +64,26 @@ def audit(root, tools_label, source_label, label):
                 "usr/bin/systemd-cryptsetup",
                 "usr/sbin/cryptsetup",
                 "usr/lib/x86_64-linux-gnu/cryptsetup/libcryptsetup-token-systemd-tpm2.so",
-                "usr/bin/dd"):
+                "usr/bin/dd",
+                # Item 9+10: crypttab-driven unlock and the /data filesystem.
+                "usr/sbin/mke2fs",
+                "usr/bin/cmp",
+                "usr/lib/firearc/data-enroll",
+                "usr/lib/firearc/data-mount",
+                "usr/lib/systemd/system-generators/systemd-cryptsetup-generator"):
             if not re.search(r"^\S*\s+[^\n]+ " + re.escape(required_file) + r"$",
                              listing, re.MULTILINE):
                 raise SafetyError("Initrd lacks the explicit data-unlock tool: " + required_file)
+        if not re.search(r"^l\S*\s+[^\n]+ usr/sbin/mkfs\.ext4 -> mke2fs$",
+                         listing, re.MULTILINE):
+            raise SafetyError("Initrd lacks the mkfs.ext4 -> mke2fs link")
+        for executable in ("usr/lib/firearc/data-enroll", "usr/lib/firearc/data-mount"):
+            if not re.search(r"^-rwxr-xr-x\s+[^\n]+ " + re.escape(executable) + r"$",
+                             listing, re.MULTILINE):
+                raise SafetyError("Data gate is not executable: " + executable)
         installed = {"authority.sh": "usr/lib/firearc/authority.sh", "firearc-verify-root": "usr/lib/firearc/verify-root",
+                     "firearc-data-enroll": "usr/lib/firearc/data-enroll",
+                     "firearc-data-mount": "usr/lib/firearc/data-mount",
                      "firearc-verify-root.service": "etc/systemd/system/firearc-verify-root.service",
                      "sysroot.mount": "etc/systemd/system/sysroot.mount",
                      "firearc-boot-failure.service": "etc/systemd/system/firearc-boot-failure.service",

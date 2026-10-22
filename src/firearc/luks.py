@@ -56,6 +56,8 @@ LUKS_LABEL = "FIREARC_DATA"
 # followed by the 32-byte recovery credential, padded to one sector.
 ENROLL_MAGIC = b"FIREARC-ENROLL-KEY-V1\n"
 ENROLL_DISK_BYTES = 512
+# Nonsecret authorization in transport block 2: initial filesystem birth only.
+ENROLL_FORMAT_MAGIC = b"FIREARC-FORMAT-ONCE-V1\n"
 # The systemd-tpm2 LUKS2 token fields the enrollment contract pins.
 TOKEN_TYPE = "systemd-tpm2"
 # cryptsetup 2.7.5 defaults kept deliberately: argon2id KDF, aes-xts-plain64,
@@ -91,6 +93,31 @@ def region_digest(path, offset=0, size=None):
             hasher.update(block)
             remaining -= len(block)
     return hasher.hexdigest()
+
+
+def header_digest(path):
+    """Digest of the LUKS2 header area only (the sealed material).
+
+    After enrollment the header is the volume's identity for per-boot
+    assertions: the payload is the device's mutable data by design, so an
+    unlocked-and-mounted filesystem writing into it must not be mistaken
+    for tampering. Unlock/mount operations never write the header.
+    """
+    with open(path, "rb") as handle:
+        handle.seek(DATA_OFFSET)
+        header = parse_header_json(handle.read(HEADER_READ_BYTES))
+    # Include BOTH metadata copies and ALL keyslot material, not just the
+    # first MiB used when parsing JSON. The crypt segment starts after them.
+    segments = header.get("segments", {})
+    if set(segments) != {"0"} or segments["0"].get("type") != "crypt":
+        raise SafetyError("Unsupported data segment layout for LUKS2 identity")
+    offset = segments["0"].get("offset")
+    if not isinstance(offset, str) or not offset.isdecimal():
+        raise SafetyError("Invalid LUKS2 payload offset")
+    size = int(offset)
+    if not HEADER_READ_BYTES <= size < DATA_BYTES or size % 4096:
+        raise SafetyError("LUKS2 payload offset lies outside its partition")
+    return region_digest(path, DATA_OFFSET, size)
 
 
 def assert_region_blank(path, what):
@@ -180,11 +207,13 @@ def write_secret(path, blob):
     os.chmod(path, 0o600)
 
 
-def build_enroll_disk(path, credential):
-    """Write the one-shot enrollment transport: magic block + credential."""
+def build_enroll_disk(path, credential, *, initialize_filesystem=False):
+    """Write credential transport, optionally authorizing FIRST filesystem birth."""
     if len(credential) != RECOVERY_BYTES:
         raise SafetyError("Enrollment transport requires the exact credential size")
     blob = ENROLL_MAGIC + b"\0" * (32 - len(ENROLL_MAGIC)) + credential
+    if initialize_filesystem:
+        blob += ENROLL_FORMAT_MAGIC + b"\0" * (32 - len(ENROLL_FORMAT_MAGIC))
     blob += b"\0" * (ENROLL_DISK_BYTES - len(blob))
     if len(blob) != ENROLL_DISK_BYTES:
         raise SafetyError("Enrollment transport has unexpected size")

@@ -16,7 +16,7 @@ import time
 import uuid
 
 from . import builder, device, enroll, firmware, firmware_build, firmware_layout, initrd, pcr_sign, rootfs, sbom, secureboot, sign, uki
-from .inputs import validate_locks
+from .inputs import load_lock, validate_locks
 from .integrity import SafetyError, private_directory, read_json, regular_file, sha256, verify_file, write_json, ok_line
 
 
@@ -40,6 +40,11 @@ DEPENDENCIES = {
     "firmware-sign": ("tools", "firmware-build", "futility"),
     "firmware-layout": ("firmware-build",),
     "uki": ("tools", "root", "rootfs"),
+    "shell-uki": ("tools", "root", "rootfs"),
+    "shell-pcr-sign": ("tools", "shell-uki"),
+    "shell-sign": ("tools", "root", "shell-pcr-sign"),
+    "shell-enroll": ("firmware-sign", "shell-sign"),
+    "shell-device": ("tools", "rootfs", "shell-sign"),
     "pcr-sign": ("tools", "uki"),
     "sign": ("tools", "root", "pcr-sign"),
     "enroll": ("firmware-sign", "sign"),
@@ -115,6 +120,51 @@ def _tree_bytes(path):
     return total
 
 
+def _prune_check_disks(root, records):
+    """Remove only receipt-unpublished working disks of completed boot gates."""
+    root = Path(root)
+    candidates = []
+    for stage in ("check-boot", "check-secure-boot", "check-firmware-vboot"):
+        record = records.get(stage, {})
+        match = STAGE_DIR_PATTERN.fullmatch(record.get("id", ""))
+        if not match or match.group("stage") not in (stage, stage[:15]):
+            continue
+        expected = Path("build/images") / record["id"] / "completion.json"
+        if not record.get("receipt") or not (root / record["receipt"]).exists():
+            continue
+        if record["receipt"] != expected.as_posix():
+            raise SafetyError("Check scratch receipt is outside its stage directory")
+        receipt = regular_file(root, record["receipt"])
+        verify_file(receipt, record["receipt_sha256"])
+        proof = read_json(receipt)
+        if not proof.get("passed") or proof.get("stage") != stage:
+            continue
+        work = receipt.parent
+        result_name = (work / "result.json").relative_to(root).as_posix()
+        files = proof.get("files", {})
+        if result_name not in files:
+            continue
+        for name, digest in files.items():
+            verify_file(regular_file(root, name), digest)
+        if not read_json(work / "result.json").get("passed"):
+            continue
+        scratch = work if stage == "check-boot" else work / "disks"
+        if not scratch.exists():
+            continue
+        private_directory(scratch)
+        for path in sorted(scratch.glob("device-*.raw")):
+            name = path.relative_to(root).as_posix()
+            if name not in files:
+                regular_file(scratch, path.name)  # Never follow a scratch symlink.
+                candidates.append((path, name, path.stat().st_size))
+    # Validate every receipt and path before deleting any current-check scratch.
+    removed = []
+    for path, name, size in candidates:
+        path.unlink()
+        removed.append({"file": name, "bytes": size})
+    return removed
+
+
 def prune(root, *, keep=0):
     """Delete superseded stage evidence: keep the current dirs plus `keep` previous.
 
@@ -124,17 +174,22 @@ def prune(root, *, keep=0):
     labels); those stay untouched. Everything else — superseded generations
     and debris from failed or interrupted runs — is deleted immediately, so
     evidence for a stage costs disk only while it is the active generation.
-    Deleting uses the same mapped-UID cleanup as `clean` because
+    Completed current boot checks also discard their disposable working disks,
+    but only after receipt verification and only if those files are unpublished.
+    Logs, results, flash evidence, output artifacts, devices and snapshots stay.
+    Deleting trees uses the same mapped-UID cleanup as `clean` because
     container-built files may not be user-owned.
     """
     build = Path(root) / "build"
     if not build.is_dir():
-        return {"removed": [], "kept": [], "bytes_freed": 0}
+        return {"removed": [], "scratch_removed": [], "kept": [], "bytes_freed": 0}
     protected = set()
+    records = {}
     state_path = build / "state.json"
     if state_path.exists():
         state = read_json(regular_file(build, "state.json"))
-        protected.update(record["id"] for record in state.get("stages", {}).values()
+        records = state.get("stages", {})
+        protected.update(record["id"] for record in records.values()
                          if isinstance(record, dict) and "id" in record)
     devices = build / "devices"
     if devices.is_dir():
@@ -166,6 +221,7 @@ def prune(root, *, keep=0):
                 continue
             by_stage.setdefault((family.name, prefixes[match.group("stage")]),
                                 []).append(entry)
+    scratch_removed = _prune_check_disks(root, records)
     removed, kept = [], []
     for (_, stage), entries in sorted(by_stage.items()):
         ordered = sorted(entries, key=lambda path: path.stat().st_mtime, reverse=True)
@@ -174,8 +230,8 @@ def prune(root, *, keep=0):
             size = _tree_bytes(entry)
             _remove_tree(entry)
             removed.append({"dir": entry.name, "bytes": size})
-    return {"removed": removed, "kept": sorted(kept),
-            "bytes_freed": sum(item["bytes"] for item in removed)}
+    return {"removed": removed, "scratch_removed": scratch_removed, "kept": sorted(kept),
+            "bytes_freed": sum(item["bytes"] for item in removed + scratch_removed)}
 
 
 class Pipeline:
@@ -255,17 +311,18 @@ class Pipeline:
     def ensure(self, stage):
         if stage in self.memo:
             return self.memo[stage]
-        if stage in ("sign", "enroll") and not (self.root / "secrets/manifest.json").is_file():
+        input_stage = stage.removeprefix("shell-")
+        if input_stage in ("sign", "enroll") and not (self.root / "secrets/manifest.json").is_file():
             raise SafetyError("Development signing hierarchy absent; run just keys first")
-        if stage in ("pcr-sign", "sign") and not (self.root / "secrets/pcr/manifest.json").is_file():
+        if input_stage in ("pcr-sign", "sign") and not (self.root / "secrets/pcr/manifest.json").is_file():
             raise SafetyError("Development PCR-policy key absent; run just pcr-keys first")
         dependencies = {name: self.ensure(name) for name in DEPENDENCIES[stage]}
         if stage == "metadata" or stage == "packages-tools":
             source = sha256(self.root / "locks/debian-build.json")
         elif stage == "packages-root":
             source = sha256(self.root / "locks/root.json")
-        elif stage in self.STAGE_INPUTS:
-            source = [sha256(self.root / name) for name in self.STAGE_INPUTS[stage]]
+        elif input_stage in self.STAGE_INPUTS:
+            source = [sha256(self.root / name) for name in self.STAGE_INPUTS[input_stage]]
         else:
             source = self.digest
         fingerprint = hashlib.sha256(json.dumps([source, {name: value["receipt_sha256"] for name, value in dependencies.items()}, sys.version], sort_keys=True).encode()).hexdigest()
@@ -350,22 +407,27 @@ class Pipeline:
         if stage == "firmware-layout":
             firmware_layout.inspect(root, deps["firmware-build"]["id"], build_id)
             return self.build / "firmware-layout" / build_id, {}
-        if stage == "uki":
-            uki.build(root, deps["tools"]["id"], deps["root"]["id"], deps["rootfs"]["id"], build_id)
+        # Normal and console images use the same verified builders. Only the
+        # dependency namespace and the UKI's explicit terminal variant differ.
+        image_stage = stage.removeprefix("shell-")
+        prefix = "shell-" if stage.startswith("shell-") else ""
+        if image_stage == "uki":
+            uki.build(root, deps["tools"]["id"], deps["root"]["id"], deps["rootfs"]["id"],
+                      build_id, shell=bool(prefix))
             return self.build / "images" / build_id, {}
-        if stage == "pcr-sign":
-            pcr_sign.build(root, deps["tools"]["id"], deps["uki"]["id"], build_id)
+        if image_stage == "pcr-sign":
+            pcr_sign.build(root, deps["tools"]["id"], deps[prefix + "uki"]["id"], build_id)
             return self.build / "images" / build_id, {}
-        if stage == "sign":
+        if image_stage == "sign":
             sign.build(root, deps["tools"]["id"], deps["root"]["id"],
-                       deps["pcr-sign"]["id"], build_id)
+                       deps[prefix + "pcr-sign"]["id"], build_id)
             return self.build / "images" / build_id, {}
-        if stage == "enroll":
-            enroll.build(root, deps["firmware-sign"]["id"], deps["sign"]["id"], build_id)
+        if image_stage == "enroll":
+            enroll.build(root, deps["firmware-sign"]["id"], deps[prefix + "sign"]["id"], build_id)
             return self.build / "images" / build_id, {}
-        if stage == "device":
+        if image_stage == "device":
             device.assemble(root, deps["tools"]["id"], deps["rootfs"]["id"],
-                            deps["sign"]["id"], build_id)
+                            deps[prefix + "sign"]["id"], build_id)
             return self.build / "images" / build_id, {}
         if stage == "check-secure-boot":
             secureboot.check_secure_boot(root, deps["tools"]["id"], deps["pcr-sign"]["id"],
@@ -459,6 +521,8 @@ class Pipeline:
 
 
 def run(root, command, *, online=False):
+    if command not in DEPENDENCIES and command not in ("status", "bootstrap", "build", "verify-build"):
+        raise SafetyError(f"Unknown build command or stage: {command}")
     with project_lock(root):
         if command == "status":
             path = root / "build/state.json"
@@ -467,24 +531,14 @@ def run(root, command, *, online=False):
         if command == "bootstrap":
             pipeline.ensure("packages-tools")
             pipeline.ensure("packages-root")
-        elif command == "build-tools": pipeline.ensure("tools")
-        elif command == "build-root": pipeline.ensure("root")
-        elif command == "sbom": pipeline.ensure("sbom")
-        elif command == "firmware-sources": pipeline.ensure("firmware-sources")
-        elif command == "firmware-build": pipeline.ensure("firmware-build")
-        elif command == "futility": pipeline.ensure("futility")
-        elif command == "firmware-sign": pipeline.ensure("firmware-sign")
-        elif command == "firmware-layout": pipeline.ensure("firmware-layout")
-        elif command == "uki": pipeline.ensure("uki")
-        elif command == "pcr-sign": pipeline.ensure("pcr-sign")
-        elif command == "sign": pipeline.ensure("sign")
-        elif command == "enroll": pipeline.ensure("enroll")
-        elif command == "device": pipeline.ensure("device")
-        elif command == "check-secure-boot": pipeline.ensure("check-secure-boot")
-        elif command == "check-firmware-vboot": pipeline.ensure("check-firmware-vboot")
-        elif command == "check-boot": pipeline.ensure("check-boot")
-        elif command == "check-initrd": pipeline.ensure("check-initrd")
-        elif command == "check-rootfs": pipeline.ensure("check-rootfs")
+        elif command in DEPENDENCIES:
+            record = pipeline.ensure(command)
+            if command == "firmware-sources":
+                # Explicit acquisition owns the SDK too, including when the
+                # source receipt was cached. Offline builds never fetch it.
+                firmware_build.ensure_sdk(root / "build/firmware" / record["id"],
+                                          load_lock(root, "firmware-sources"),
+                                          allow_network=online)
         else:
             outputs = pipeline.publish()
             if command == "verify-build":

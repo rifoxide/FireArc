@@ -429,8 +429,8 @@ show(0);
 <text class="lbl" x="10" y="20">ACQUIRE (network, once)</text>
 <rect class="box" x="10" y="30" width="130" height="40"/><text class="sub" x="20" y="54">bootstrap · pinned digests</text>
 <text class="lbl" x="170" y="20">BUILD (offline, ordered)</text>
-<rect class="box" x="170" y="30" width="120" height="40"/><text class="sub" x="180" y="54">build-tools</text>
-<rect class="box" x="310" y="30" width="120" height="40"/><text class="sub" x="320" y="54">build-root / rootfs</text>
+<rect class="box" x="170" y="30" width="120" height="40"/><text class="sub" x="180" y="54">tools stage</text>
+<rect class="box" x="310" y="30" width="120" height="40"/><text class="sub" x="320" y="54">root / rootfs stages</text>
 <rect class="box" x="170" y="100" width="120" height="40"/><text class="sub" x="180" y="124">firmware-sources</text>
 <rect class="box" x="310" y="100" width="120" height="40"/><text class="sub" x="320" y="124">firmware-build</text>
 <rect class="box" x="450" y="100" width="110" height="40"/><text class="sub" x="460" y="124">futility</text>
@@ -474,41 +474,30 @@ show(0);
 <script>
 const CMDS=[
 // cmd, group, needs, what it does (one line), note
-["bootstrap","build","network, once","Downloads every pinned public dependency by digest. The only step that touches the network.","No pin match ⇒ hard failure. Never bypass."],
-["build-tools","build","bootstrap","Compiles the pinned toolchain container image.","All later stages run inside it."],
-["build-root / build-rootfs","build","tools","mkosi Debian root + deterministic ext4 + verity tree from the pinned snapshot.","Root bytes freeze here — nothing may touch them after verity computation."],
-["uki","build","root","Assembles the unsigned slot-A UKI (ukify): kernel + initrd + cmdline.","Inputs frozen; content hash feeds PCR 11."],
-["pcr-sign","build","uki, pcr-keys","Rebuilds the UKI with signed .pcrsig/.pcrpkey (systemd-measure).","Distinct role from the sb signer — by design."],
+["bootstrap","build","network, once","Acquires pinned Debian dependencies by digest. Firmware sources have their own explicit acquisition command.","No pin match ⇒ hard failure. Never bypass."],
+["build","build","bootstrap, development keys","Builds the normal signed OS artifacts and their verified dependencies offline.","Not a production release qualification."],
+["stage &lt;name&gt;","build","pinned inputs","Builds or audits one intermediate DAG stage: tools, root, rootfs, uki, sign, enroll, device and component audits.","Replaces individual stage commands; see commands.md."],
 ["firmware-sources","build","network, once","Fetches pinned upstream coreboot + Dasharo at exact commits.",""],
-["firmware-build","build","firmware-sources","Compiles the Q35 ROM offline inside the pinned SDK.",""],
-["firmware-layout","build","firmware-build","Maps flash regions: RO/RW, SMMSTORE, gaps, vboot capacity.","Archived as evidence."],
-["futility","build","firmware-sources","Builds the vboot signing tool from the same sources.",""],
-["firmware-sign","keys","vboot-keys, futility","Signs the firmware RW section with the dev vboot keyset.",""],
-["sign","keys","keys, uki","Signs UKI + systemd-boot with the sb key.","Container sees only sb.key/sb.crt."],
-["enroll","keys","keys","Writes PK/KEK/db into the variable store, sets SecureBoot=1/SetupMode=0. Offline surgery — no boot.",""],
+
 ["keys / vboot-keys / pcr-keys","keys","once","Generates the three dev hierarchies under gitignored secrets/.","Separate roles: sb signer · vboot · PCR-policy key."],
-["device","build","sign, enroll","Assembles the installed-device disk image: ESP + slot A + blank FIREARC_DATA.","Factory image — per-device state comes next."],
+["verify-build","gates","build","Verifies receipts, embedded initrd units and filesystem controls.","Does not replace the three independent boot gates."],
 ["check-boot","gates","device","Boots the disk in QEMU and asserts the integrity gate outcome.","Fail-closed expected: tamper ⇒ poweroff."],
 ["check-secure-boot","gates","enrolled flash","Signed chain boots; tampered/modified/loader-tampered variants refused; store survives.",""],
 ["check-firmware-vboot","gates","firmware-sign","Signed RW executes; tampered and attacker-keyed RW refused pre-payload.",""],
-["check-initrd","gates","initrd","Asserts the exact early-boot tool set (cryptenroll, cryptsetup, dd, TPM2 plugin).","No crypt modules — audit is explicit."],
-["check-rootfs","gates","root","Verifies the frozen root image and verity geometry.",""],
+
 ["device-provision","dev","device stage","Creates (or --replace) a persistent profile: disk + flash copy + isolated swtpm + LUKS2 volume + recovery credential.","Never resets silently. Unique per device."],
 ["data-enroll","dev","provisioned, pcr-keys","One TPM2 enrollment session (see diagram above). ~40 s.","Interrupted sessions are adopted, not wedged."],
 ["device-boot","dev","provisioned","Cold-start N times; asserts markers, TPM TIS/ACPI, write confinement, flash/TPM/data identity continuity.","Headless — evidence in runs/NNNN/serial.log."],
-["./scripts/boot-live &lt;name&gt;","dev","provisioned","Raw QEMU with the serial console on your terminal (throwaway state copy).","Ctrl-A X to quit. Live console for humans."],
-["device-reboot","dev","running","Warm reset inside one powered session; ends on a verified boot.","Flash/TPM stay powered through resets."],
-["device-stop","dev","running","QMP ACPI powerdown after the boot marker.","Orderly shutdown."],
-["device-powercut","dev","running","SIGKILL QEMU + swtpm after a verified boot. Hard power loss.","For power-loss studies."],
+["shell","dev","pinned inputs, running Docker","Bash as root inside verified Debian; separate signed image, fresh TPM, disposable disk/flash overlays.","Read-only root; temporary /run and /tmp. Saved device data is not attached. Exit powers off; Ctrl-A X quits."],
+["device-reboot","dev","provisioned","Warm reset inside one powered session; ends on a verified boot.","Flash/TPM stay powered through resets."],
+["device-stop","dev","provisioned","QMP ACPI powerdown after the boot marker.","Orderly shutdown."],
+["device-powercut","dev","provisioned","SIGKILL QEMU + swtpm after a verified boot. Hard power loss.","For power-loss studies."],
 ["device-snapshot / device-restore","dev","—","Copy / explicitly restore the whole persistent state.","Immutable snapshots."],
 ["prune","maint","—","Deletes superseded stage evidence. Current stage dirs always stay.","--keep N to retain history."],
 ["status / doctor","maint","—","Stage table / environment sanity.",""],
-["verify-inputs","maint","—","Re-checks every pin: digests, signatures, upstream metadata.","Part of just check."],
-["secrets","maint","—","Asserts the dev key hierarchy exists and nothing leaked into the tree.",""],
-["test","maint","—","243 offline unit tests (~10 s).","No network, no builds."],
-["sbom","maint","build-root","CycloneDX inventory of the locked package closure.",""],
-["clean","maint","explicit confirm","Removes build outputs. Source and secrets untouched.",""],
-["reproduce","maint","—","Rebuilds from pins in a fresh tree and compares digests.","The reproducibility proof."],
+["check","maint","—","Offline input validation, repository secret scan and complete unit suite.","No network, no image builds."],
+["clean","maint","--yes required","Deletes build/, including saved devices, recovery credentials and TPM state.","Signing identities under secrets/ survive. Use prune for routine cleanup."],
+["reproduce","maint","--yes required","Erases build/ and reacquires/builds twice to compare digests.","Saved devices are deleted; this is an explicit destructive reproduction experiment."],
 ];
 const GROUPS={"build":1,"keys":2,"gates":3,"dev":4,"maint":5};
 function row(c){return `<tr><td><span class="cmd">just ${c[0]}</span></td><td>${c[2]}</td><td>${c[3]}${c[4]?'<div class="small" style="color:var(--warn)">⚠ '+c[4]+'</div>':''}</td></tr>`}
@@ -530,11 +519,15 @@ document.getElementById('cmdfilter').addEventListener('input',fill);
 fill();
 </script>
 
+<p>For the current interface and historical command-name migration, see <a href="commands.md">Commands</a>.
+The data-unlock diagrams describe the earlier enrollment milestone; current crypttab/mount ownership is documented in
+<a href="decisions/0012-crypttab-data-mount-gate.md">ADR 0012</a>.</p>
 <h3>Typical sessions</h3>
 <pre>
 # first time on this machine
-just bootstrap && just build && just keys && just vboot-keys && just pcr-keys \
-  && just firmware-sign && just enroll && just verify-build
+just bootstrap && just firmware-sources --online \
+  && just keys && just vboot-keys && just pcr-keys \
+  && just build && just verify-build
 
 # qualify the chain (the gates)
 just check-firmware-vboot && just check-secure-boot && just check-boot
@@ -544,8 +537,8 @@ just device-provision --name devA        # disk + flash + swtpm + LUKS2 + recove
 just data-enroll --name devA             # TPM2 token (PCR 7 + signed PCR 11), in-boot validation
 just device-boot --name devA --count 3   # three cold starts, all markers + identity asserted
 
-# watch it with your own eyes
-./scripts/boot-live devA
+# open a root shell in a fresh disposable VM (saved devices are not attached)
+just shell
 
 # clean disk after experiments
 just prune --keep 0

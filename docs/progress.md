@@ -1,9 +1,64 @@
 # Implementation progress
 
 **Updated:** 2026-10-21. **Stage:** Phase 5 (TPM-bound data) in progress —
-signed PCR 11 authorizations, per-device LUKS2 volumes and TPM2 enrollment
-with unattended unlock landed; unlock ordering and escrow next. The
-complete secured appliance is not yet implemented.
+signed PCR 11 authorizations, per-device LUKS2 volumes, TPM2 enrollment,
+crypttab-driven unlock and ordered encrypted `/data` mounts implemented.
+The current pinned version passes cold/warm boots and mount-failure refusal;
+a distinct retained/candidate systemd-version pair, the complete refusal matrix,
+and escrow remain open. The complete secured appliance is not yet implemented.
+
+### Latest: Phase 5 items 9–10
+
+- Pinned cryptsetup generator + crypttab, explicit root/PCR-phase dependencies,
+  `sysroot-data.mount` with `rw,noexec,nodev,nosuid`; the probe no longer unlocks.
+- Filesystem birth requires a persisted, one-time transport grant. Retries
+  preserve ext4 or refuse; they cannot silently format again. The transport
+  uses an explicit disk serial rather than nondeterministic `/dev/sdb`.
+- Enrolled identity covers both LUKS metadata copies and the whole keyslot area;
+  mutable filesystem ciphertext is no longer incorrectly treated as identity.
+- `data-verified`: enrollment, two cold boots and one warm reset passed.
+  `data-updated`: latest OS/firmware with retained data/TPM/UEFI variables,
+  two cold boots passed without re-enrollment (lab transition, not RAUC/A/B).
+  All 259 tests, three boot-chain gates, initrd audit and `verify-build` passed. A disposable
+  filesystem-corruption test refused boot without changing partition bytes;
+  restoring its snapshot restored successful boot.
+- See [validation](validation/data-mount.md) and [ADR 0012](decisions/0012-crypttab-data-mount-gate.md).
+  Item 9 remains partially open for cross-version qualification; service bind
+  mounts await actual consumers. No Phase 6–13 implementation or G5 exit claim.
+
+## Repository interface cleanup
+
+- Intermediate recipes are consolidated into `just stage <name>`; the three
+  boot gates, key roles and destructive device operations remain explicit.
+  `just check` still runs input validation, the secret scan and all offline tests.
+- Removed the old standalone `boot-live` runner and duplicate HTML command map;
+  `just shell` is the supported disposable console and [Commands](commands.md)
+  is the canonical reference/migration table. The HTML boot-chain guide remains.
+- Pruning now verifies successful check receipts before removing unpublished
+  working disks. Logs, flash evidence, current outputs and saved devices remain.
+  Incomplete/failed current checks and published disk artifacts are preserved;
+  tampered receipts and scratch symlinks fail closed.
+- Firmware SDK acquisition now belongs to `firmware-sources --online`, not a
+  removed online-build alias; a cached source receipt still checks the SDK.
+- Routine cleanup reclaimed 34.14 GiB of working disks. All 256 saved device/key
+  files were SHA-256-identical before and after pruning.
+- 281 offline tests pass. This cleanup does not change guest unlock/mount policy
+  or claim new boot-chain qualification.
+
+## Host-side script refactor
+
+- Split CLI parser construction, command execution and output/error handling.
+  Shared locked helpers replace repeated key/device orchestration; the checkout
+  launcher stays thin. No commands, flags, defaults or exit codes changed.
+- Normal and shell image stages share the verified UKI/PCR/sign/enroll/device
+  builders while keeping separate dependency namespaces and artifacts.
+- Added characterization tests before structural changes: operation arguments,
+  lock ownership/release, key dependency order, stdout JSON, errors and interrupts.
+  Both image variants retain the same builder calls and exception propagation.
+- 292 offline tests pass. All 28 command-help outputs matched the pre-refactor
+  bytes, and all 23 launcher/guest/input files were unchanged. No guest policy,
+  provisioning behavior, signing identity or saved device data was changed;
+  this is not new boot qualification.
 
 ## Implemented
 

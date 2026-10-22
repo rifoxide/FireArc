@@ -1,0 +1,63 @@
+#!/bin/sh
+# Explicit one-shot enrollment only. Normal boots never create filesystems.
+set -eu
+volume=/dev/disk/by-partlabel/FIREARC_DATA
+key=/run/firearc-recovery.key
+# Kernel sdX ordering is nondeterministic with two AHCI disks. Use the
+# enrollment disk's explicit QEMU serial, never a guessed /dev/sdb.
+transport=/dev/disk/by-id/ata-QEMU_HARDDISK_FIREARC_ENROLL_V1
+udevadm settle --timeout=30 || exit 1
+say() { echo "$1" > /dev/console; }
+cleanup() {
+    systemd-cryptsetup detach firearc-enroll >/dev/null 2>&1 || :
+    if [ -f "$key" ]; then
+        dd if=/dev/urandom of="$key" bs=32 count=1 2>/dev/null || :
+        rm -f "$key"
+    fi
+}
+fail() { say FIREARC_DATA_ENROLL_FAIL; exit 1; }
+if [ "$(dd if="$transport" bs=32 count=1 2>/dev/null)" != FIREARC-ENROLL-KEY-V1 ]; then
+    say FIREARC_ENROLL_DISK_ABSENT
+    exit 0
+fi
+trap cleanup EXIT
+[ -e /dev/tpmrm0 ] || fail
+[ -e /.extra/tpm2-pcr-signature.json ] && [ -e /.extra/tpm2-pcr-public-key.pem ] || {
+    say FIREARC_DATA_ENROLL_NO_PCRSIG
+    exit 1
+}
+cryptsetup luksDump --dump-json-metadata "$volume" > /run/firearc-enroll-header.json || fail
+if grep -q systemd-tpm2 /run/firearc-enroll-header.json; then
+    say FIREARC_DATA_ENROLL_ALREADY
+    exit 1
+fi
+umask 077
+dd if="$transport" of="$key" bs=32 skip=1 count=1 2>/dev/null || fail
+[ "$(stat -c %s "$key")" = 32 ] || fail
+timeout 120 systemd-cryptsetup attach firearc-enroll "$volume" "$key" headless || fail
+# A retry must not destroy a filesystem created by an interrupted enrollment.
+# The host only authorizes initial creation on an unchanged provisioned volume.
+# blkid errors/unknown signatures are not permission to overwrite data.
+set +e
+signature=$(blkid -p -s TYPE -o value /dev/mapper/firearc-enroll)
+rc=$?
+set -e
+case "$rc:$signature" in
+    0:ext4) : ;; # interrupted enrollment: preserve existing filesystem
+    2:)
+        # The host records this grant before sending it. It is never sent
+        # again on retry, even when a failed mkfs left no readable signature.
+        [ "$(dd if="$transport" bs=32 skip=2 count=1 2>/dev/null)" = FIREARC-FORMAT-ONCE-V1 ] || fail
+        mkfs.ext4 -q -L FIREARC_DATA -E lazy_itable_init=0,lazy_journal_init=0 /dev/mapper/firearc-enroll || {
+            say FIREARC_DATA_MKFS_FAIL
+            fail
+        }
+        ;;
+    *) fail ;;
+esac
+say FIREARC_DATA_MKFS_OK
+systemd-cryptsetup detach firearc-enroll || fail
+timeout 120 systemd-cryptenroll --tpm2-device=/dev/tpmrm0 --tpm2-pcrs=7 \
+    --tpm2-public-key=/.extra/tpm2-pcr-public-key.pem --tpm2-public-key-pcrs=11 \
+    --tpm2-signature=/.extra/tpm2-pcr-signature.json --unlock-key-file="$key" "$volume" || fail
+say FIREARC_DATA_ENROLL_OK

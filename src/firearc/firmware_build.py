@@ -14,6 +14,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import uuid
 
 from . import firmware
 from .builder import logged
@@ -44,8 +45,11 @@ def ensure_sdk(work, lock, *, allow_network):
     probe = subprocess.run(["docker", "image", "inspect", image], capture_output=True, text=True)
     if probe.returncode:
         if not allow_network:
-            raise SafetyError("Pinned coreboot SDK image absent; run just firmware-build --online")
-        logged(work, "pull-sdk", ["docker", "pull", image], timeout=3600)
+            raise SafetyError("Pinned coreboot SDK image absent; run just firmware-sources --online")
+        # Cached source receipts can outlive Docker's image cache. Keep each
+        # explicit reacquisition's logs distinct instead of overwriting evidence.
+        logged(work, "pull-sdk-" + uuid.uuid4().hex[:12],
+               ["docker", "pull", image], timeout=3600)
         probe = subprocess.run(["docker", "image", "inspect", image], capture_output=True, text=True)
         if probe.returncode:
             raise SafetyError("Pinned coreboot SDK image unusable after acquisition")

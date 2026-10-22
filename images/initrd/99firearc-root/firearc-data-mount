@@ -1,0 +1,46 @@
+#!/bin/sh
+# Called after verified sysroot + enter-initrd + optional enrollment.
+set -eu
+volume=/dev/disk/by-partlabel/FIREARC_DATA
+say() { echo "$1" > /dev/console; }
+fail() { say "$1"; exit 1; }
+[ -b "$volume" ] || fail FIREARC_DATA_PROBE_NO_DISK
+# The factory image has a blank partition. A recovery-only device is also
+# allowed to boot its immutable root, but no data-dependent service is started.
+set +e
+kind=$(blkid -p -s TYPE -o value "$volume")
+rc=$?
+set -e
+if [ -z "$kind" ] && { [ "$rc" = 0 ] || [ "$rc" = 2 ]; }; then
+    # blkid may return success for GPT partition metadata even with no TYPE.
+    # Only an entirely blank factory partition is acceptable here, never an
+    # unreadable/corrupted enrolled volume masquerading as pre-provisioned.
+    size=$(blockdev --getsize64 "$volume") || fail FIREARC_DATA_UNLOCK_REFUSED
+    cmp -n "$size" "$volume" /dev/zero || fail FIREARC_DATA_UNLOCK_REFUSED
+    say FIREARC_DATA_TOKEN_ABSENT
+    exit 0
+fi
+[ "$rc:$kind" = 0:crypto_LUKS ] || fail FIREARC_DATA_UNLOCK_REFUSED
+cryptsetup luksDump --dump-json-metadata "$volume" > /run/firearc-data-header.json || fail FIREARC_DATA_UNLOCK_REFUSED
+if ! grep -q systemd-tpm2 /run/firearc-data-header.json; then
+    say FIREARC_DATA_TOKEN_ABSENT
+    exit 0
+fi
+# Only crypttab's generated unit attaches the TPM-bound volume. The explicit
+# .mount unit requires it, has the same root/phase ordering, and enforces
+# noexec,nodev,nosuid. No mkdir or format is permitted on this normal path.
+systemctl start sysroot-data.mount || fail FIREARC_DATA_UNLOCK_REFUSED
+# Verify the actual mount source, type and restrictions, not just a directory.
+while read -r source target type options rest; do
+    [ "$source:$target:$type" = /dev/mapper/firearc-data:/sysroot/data:ext4 ] || continue
+    for restriction in rw noexec nodev nosuid; do
+        case ",$options," in
+            *",$restriction,"*) : ;;
+            *) fail FIREARC_DATA_MOUNT_MISSING ;;
+        esac
+    done
+    say FIREARC_DATA_UNLOCK_OK
+    say FIREARC_DATA_MOUNT_OK
+    exit 0
+done < /proc/mounts
+fail FIREARC_DATA_MOUNT_MISSING

@@ -65,8 +65,8 @@ its verity hash is finalized.
 
 ```sh
 just check
-just build-root
-just check-initrd
+just stage root
+just stage check-initrd
 ```
 
 The pipeline selects the current root automatically. The static checker verifies exact

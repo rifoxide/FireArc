@@ -1,10 +1,16 @@
 # Component validation
 
+Dated records retain the command spelling used when their evidence was captured.
+Intermediate builds now use `just stage <name>`; see the
+[current command reference and migration table](../commands.md). Historical
+`just build-rootfs`, for example, is now `just stage rootfs`.
+
 | Component | Acceptance record |
 | --- | --- |
 | Public dependency acquisition and clean builds | [Build system](build-system.md) |
 | Root, initramfs and integrity payloads | [Root and initramfs](appliance-root.md) |
 | Development device assembly and QEMU boot gate | [Device boot](device-boot.md) |
+| Explicit disposable Debian root shell | [Development shell](development-shell.md) |
 | Firmware flash layout and boot write confinement | [Firmware layout](firmware-layout.md) |
 | vboot adoption investigation (no adoption yet) | [Firmware vboot](firmware-vboot.md) |
 | Persistent installed-device profile with swtpm | [Device profile](device-profile.md) |

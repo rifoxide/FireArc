@@ -13,6 +13,26 @@ records. Architecture decisions belong in `docs/decisions/`.
    actual outcomes and limitations. A passing static check is not a boot gate.
 5. Before a release, run a clean reconstruction and reproducibility comparison.
 
+## Command-script ownership
+
+- `scripts/firearc.py` stays a thin checkout launcher; it contains no build or
+  provisioning logic.
+- `cli.create_parser()` defines flags/defaults without acquiring locks or doing
+  work. `cli.execute()` dispatches parsed arguments and returns operation results.
+- The CLI's key and saved-device helpers hold the project lock across the entire
+  operation. Key roles remain separate; pipeline and reproduction commands keep
+  their existing internal lock ownership.
+- `cli.main()` alone renders result JSON and operational errors/exit codes. The
+  interactive shell keeps control of the terminal and emits no result JSON.
+- `Pipeline.produce()` uses the same verified builders for normal and shell
+  images, with distinct dependency namespaces. Do not cross-wire shell artifacts
+  into normal published outputs.
+
+`tests/test_cli.py` fixes dispatch arguments, default flags, dependency order,
+lock lifetimes, JSON formatting and failure/interrupt behavior. Variant-builder
+coverage in `tests/test_shell.py` checks both dependency isolation and unchanged
+exception propagation. Guest security scripts are not duplicated in the CLI.
+
 Only source, configuration, locks and documentation are committed. Downloads,
 binaries, logs and successful-stage pointers live under ignored `build/`.
 No signing key or software-TPM/private device state belongs in Git or a build

@@ -18,8 +18,8 @@ closure. Missing local packages cause failure; there is no live-mirror fallback.
 
 ```sh
 just bootstrap
-just build-root
-just check-initrd
+just stage root
+just stage check-initrd
 ```
 
 Successful dependencies are selected automatically. The root recipe receives its package list from

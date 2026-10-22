@@ -545,8 +545,9 @@ Check only steps supported by project code and recorded validation. A checked do
 
 ### Phase 5 — TPM measurements and LUKS2 persistent data
 
-**Status:** ACTIVE (measurement groundwork items 1–4 complete; LUKS2 sealing
-items 5–15 next).
+**Status:** ACTIVE (items 1–6, 8 and 10 implemented; item 9's pinned crypttab
+path is qualified, distinct retained/candidate version compatibility remains
+open; escrow, full refusal/update matrices and data-retention work remain).
 
 **Owner:** platform engineer + TPM/security engineer.  
 **Depends on:** G4 and persistent swtpm harness.  
@@ -560,8 +561,8 @@ items 5–15 next).
 6. [x] Create per-device LUKS2 volumes only during explicit provisioning. Generate unique random volume material and a separate high-entropy recovery credential; never copy a populated shared LUKS header into the factory image. **Implemented 2026-10-21** (`device-provision` now formats a LUKS2 volume; ADR 0010, [validation](docs/validation/data-provisioning.md)): the factory disk gained a **blank** `FIREARC_DATA` partition (256 MiB provisional, Linux LUKS type GUID) asserted blank by two independent checks (device stage on the assembled disk; `luks.py` on the profile copy before formatting); the volume is born exactly once at provisioning from the pinned cryptsetup 2.7.5 (argon2id, aes-xts-plain64, fresh volume key/salts/UUID) with a 256-bit recovery credential as the sole keyslot — passed only by file handle, kept 0600 under the profile's `secrets/`, workspace-scrubbed, recorded by digest with an explicit escrow-pending marker (item 7), and verified to actually unlock via `--test-passphrase` in-stage. Uniqueness demonstrated on real provisions (dev7/dev8 differ in uuid, salts, region digest and credential from byte-identical factory images); the sealed region is now device identity (per-boot digest assertion, `load` refuses drift).
 7. [ ] Escrow the recovery credential over an approved secret-handling path with device identity and two-person access controls. Do not put it in serial capture, CLI arguments, general CI logs or the release artifact store.
 8. [x] Enroll TPM2 using `systemd-cryptenroll` with explicit PCR 7 binding and the approved signed PCR 11 policy. Validate the policy against the current boot before removing any temporary provisioning credential. **Implemented 2026-10-21** (`just data-enroll`; ADR 0011, [validation](docs/validation/data-provisioning.md)): enrollment runs **guest-side at the `enter-initrd` phase** — the only place the real PCR state exists (PCR 7 from the enrolled variable store, PCR 11 from the measured UKI + phase) — with `--tpm2-pcrs=7 --tpm2-public-key=/.extra/tpm2-pcr-public-key.pem --tpm2-public-key-pcrs=11` (systemd-stub exposes the item-5 `.pcrsig`/`.pcrpkey` under `/.extra/`), unlocked by the recovery credential carried on a one-shot 512-byte transport disk (magic + credential; scrubbed after the session, never on argv/serial). The crypt/systemd-cryptsetup dracut modules stay omitted — no automatic crypttab path — while `check-initrd` requires the exact binaries (cryptenroll, systemd-cryptsetup, cryptsetup, the TPM2 token plugin, dd). Validation is threefold: the same boot's probe unit performs a real unattended `systemd-cryptsetup attach` (`FIREARC_DATA_UNLOCK_OK`, then detach — unlock ordering after the root gate and pcrphase encoded from day one), the harness verifies the mutated header host-side (keyslots exactly 0+1, one systemd-tpm2 token, plain PCR {7}, signed PCR {11}, policy key byte-equal to `secrets/pcr/pcr.pub`), and every later boot reports its probe verdict on the serial contract. Proven: dev9 unlocks unattended across cold boots; dev10 (dev9's disk on a fresh swtpm) boots its verified root but gets `FIREARC_DATA_UNLOCK_REFUSED`. No temporary credential exists beyond the recovery credential itself, which stays as keyslot 0 — it is the item-7 escrow material, not a throwaway; removing it would destroy escrow recovery.
-9. [ ] Use the corresponding pinned `systemd-cryptsetup` implementation and crypttab configuration. Verify that both retained and candidate systemd versions can unlock the same enrolled token format.
-10. [ ] Unlock only after root integrity checks and at the selected PCR phase. Mount `/data` and required bind mounts before dependent services; missing data must not cause secrets to be written to an unencrypted fallback directory.
+9. [ ] Use the corresponding pinned `systemd-cryptsetup` implementation and crypttab configuration. Verify that both retained and candidate systemd versions can unlock the same enrolled token format. **Partially implemented:** the pinned 257.13 generator consumes crypttab and owns the real unlock; cold/warm boots pass. A distinct retained/candidate version pair does not yet exist and is not claimed qualified. See ADR 0012 and [validation](docs/validation/data-mount.md).
+10. [x] Unlock only after root integrity checks and at the selected PCR phase. Mount `/data` and required bind mounts before dependent services; missing data must not cause secrets to be written to an unencrypted fallback directory. **Implemented in the development initrd harness:** crypttab's generated service requires the verified sysroot, measured `enter-initrd` phase and one-shot enrollment service; the required data gate mounts ext4 on `/sysroot/data` with `rw,noexec,nodev,nosuid` and independently checks source/type/options. Failure powers off and fails the enrolled host contract; no normal-boot formatting or writable fallback exists. There are no persistent service consumers yet, so no bind mounts are currently required; real switch-root service integration remains future work. Explicit enrollment initializes ext4 only with a persisted format-once transport grant; retries cannot reformat. Proven enrollment + two cold boots + warm reset on `data-verified`, and corrupted-filesystem refusal without a single data-partition byte changed on a disposable clone. ADR 0012 and [validation](docs/validation/data-mount.md).
 11. [ ] Test normal A boot, B boot, healthy OS update and fallback without manual re-enrollment. Routine OS updates must not require an escrow key or network key service.
 12. [ ] Move the OS disk to a fresh VM with a different swtpm identity: unattended unlock must fail. Copying the entire old TPM state is outside this test's physical-identity claim.
 13. [ ] Test Secure Boot disabled, unauthorized UKI, missing PCR signature, wrong signing key, wrong phase, TPM clear/replacement and unavailable TPM. Refuse sensitive unlock; do not auto-format or silently enroll the new TPM.
@@ -1116,30 +1117,15 @@ run/<device-or-test-id>/      disks, flash, TPM state, sockets and private test 
 
 Use a thin project-owned `justfile`. Keep orchestration in tested source modules and upstream build systems for upstream components. Choose implementation languages to fit the component without rewriting RAUC/systemd.
 
-Proposed future entry points:
+Implemented entry points are documented in [Commands](docs/commands.md) and
+listed by `just --list`. Intermediate builds use one `just stage <name>` entry
+point rather than a separate recipe per DAG node. `just check` combines input
+validation, secret scanning and offline tests. The three independent boot gates,
+key roles and explicit destructive device operations remain distinct.
 
-```text
-just doctor
-just verify-inputs
-just bootstrap
-just build
-just verify-build
-just reproduce --yes
-just firmware
-just uki
-just bundle
-just factory-image
-just device-new <device-id>  # future explicit provisioning, not ordinary boot
-just device-start <device-id>
-just device-stop <device-id>
-just test-boot
-just test-data
-just test-update
-just test-powercut
-just test-attestation
-just test-recovery
-just release-check
-```
+Dated evidence elsewhere in this plan retains historical command spellings;
+use the command reference's migration table when reproducing it. Do not create
+placeholder commands for deferred bundle, update, attestation or release work.
 
 Signing commands must be separate from ordinary builds, with explicit approved key references. Destructive provisioning/reset/image-writing commands require a validated target and explicit confirmation; no broad disk globbing or cleanup outside the selected project/device scope.
 

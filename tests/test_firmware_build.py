@@ -1,8 +1,10 @@
 """Offline firmware build-stage tests for configuration and pin binding."""
 
 from pathlib import Path
+import json
 import sys
 import unittest
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
@@ -17,6 +19,21 @@ EDK2_PIN = {source["name"]: source["commit"]
 
 
 class FirmwareBuildTests(unittest.TestCase):
+    def test_reacquiring_sdk_never_reuses_immutable_log_names(self):
+        image = "example.com/coreboot/sdk@sha256:" + "a" * 64
+        failed = Mock(returncode=1)
+        found = Mock(returncode=0, stdout=json.dumps([
+            {"Architecture": "amd64", "RepoDigests": [image]}]))
+        with temporary() as work, \
+                patch.object(firmware_build.subprocess, "run", side_effect=[failed, found, failed, found]), \
+                patch.object(firmware_build, "logged") as logged:
+            for _ in range(2):
+                self.assertEqual(firmware_build.ensure_sdk(
+                    work, {"sdk_image": image}, allow_network=True), image)
+            names = [call.args[1] for call in logged.call_args_list]
+            self.assertEqual(len(set(names)), 2)
+            self.assertTrue(all(name.startswith("pull-sdk-") for name in names))
+
     def test_sdk_reference_accepts_only_pinned_digests(self):
         image, name, digest = firmware_build.sdk_reference({"sdk_image": "coreboot/coreboot-sdk@sha256:" + "a" * 64})
         self.assertEqual(name, "coreboot/coreboot-sdk")

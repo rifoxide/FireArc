@@ -24,11 +24,13 @@ just build
 just verify-build
 ```
 
-`bootstrap` is explicit network acquisition. Builds are offline unless `--online`
-is deliberately supplied to acquire missing dependencies. `build-tools`,
-`build-root`, `build-rootfs`, `check-initrd` and `check-rootfs` resolve dependencies
-automatically. `status` reports successful stages. Internal IDs are generated
-automatically and are useful only for diagnostics.
+`bootstrap` is explicit Debian network acquisition; firmware acquisition uses
+`just firmware-sources --online` acquires both the source closure and the pinned
+coreboot SDK (including after a source-cache hit). Builds and audits are offline. Use
+`just stage <name>` for a single intermediate stage (for example `tools`, `root`,
+`rootfs`, `check-initrd` or `check-rootfs`); dependencies resolve automatically.
+`just status` reports successful stages. Internal IDs are generated automatically
+and are useful only for diagnostics. See the [command reference](commands.md).
 
 Stage fingerprints include source/configuration/lock inputs and dependency
 receipts. Only successful stages publish state; stale inputs invalidate it.
@@ -91,11 +93,15 @@ Logs, generated packages and images stay outside Git.
 
 Every successful stage build publishes a new immutable evidence directory and
 automatically prunes superseded ones, keeping each stage's current directory
-plus the previous generation (`just prune` runs the same retention manually,
-`--keep N` adjusts the budget). Current directories are exactly the ids in
+(`just prune` runs the same retention manually; `--keep N` retains N additional
+generations). Current directories are exactly the ids in
 `build/state.json`, and device profiles pin their provenance to older
 evidence directories; those are never pruned. Deletion reuses the mapped-UID
-namespace so container-owned files are removable.
+namespace so container-owned files are removable. Completed current boot gates
+also discard unpublished `device-*.raw` working copies after verifying their
+success receipts. Serial logs, result/command receipts, flash evidence, published
+outputs, saved device profiles and snapshots are preserved. Failed or incomplete
+current gates do not authorize this working-disk cleanup.
 
 `just clean --yes` deletes only `build/`, refusing symlinked/mounted cleanup
 targets. `just reproduce --yes` performs two empty-project-cache acquisition,

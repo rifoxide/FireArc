@@ -8,6 +8,13 @@ Recorded 2026-10-21. Not production provisioning, not physical-device
 qualification, and not yet unlock/mount ordering, escrow or updates
 (items 7, 9–15).
 
+> Subsequent work: [ADR 0012](../decisions/0012-crypttab-data-mount-gate.md)
+> moves real unlock ownership from the development probe to the pinned crypttab
+> generator and adds an ordered encrypted data mount. See
+> [data mount validation](data-mount.md) for cold/warm boots, failure handling,
+> format-once filesystem birth and the lab image transition. The probe/whole-
+> partition invariants below describe the original item-8 milestone.
+
 ## What the implementation claims
 
 1. The factory image (`device` stage disk) carries a **blank**

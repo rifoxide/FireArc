@@ -13,21 +13,32 @@ from .integrity import SafetyError
 
 ROOT = Path(__file__).resolve().parents[2]
 
+# One maintainer command instead of a public wrapper for every DAG node.
+BUILD_STAGES = ("tools", "root", "rootfs", "check-initrd", "check-rootfs", "sbom",
+                "firmware-build", "firmware-layout", "futility", "firmware-sign",
+                "uki", "pcr-sign", "sign", "enroll", "device")
 
-def main():
+
+def create_parser():
+    """Describe the interface without acquiring locks or running operations."""
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     for name in ("doctor", "verify-inputs", "secrets", "status"):
         commands.add_parser(name)
-    keys_command = commands.add_parser(
+    commands.add_parser("shell", help="Boot a disposable signed development VM into a Debian root shell")
+    commands.add_parser(
         "keys", help="Generate (once) the development signing hierarchy under secrets/")
     commands.add_parser(
         "vboot-keys", help="Generate (once) the development vboot keyset under secrets/vboot/")
     commands.add_parser(
         "pcr-keys", help="Generate (once) the development PCR-policy key under secrets/pcr/")
-    for name in ("bootstrap", "build-tools", "build-root", "build-rootfs", "build", "sbom", "firmware-sources", "firmware-build", "futility", "firmware-sign", "firmware-layout", "uki", "pcr-sign", "sign", "enroll", "device", "check-boot", "check-secure-boot", "check-firmware-vboot", "check-initrd", "check-rootfs", "verify-build"):
-        command = commands.add_parser(name)
-        command.add_argument("--online", action="store_true", help="Allow pinned dependency downloads")
+    for name in ("bootstrap", "build", "check-boot", "check-secure-boot",
+                 "check-firmware-vboot", "verify-build"):
+        commands.add_parser(name)
+    firmware = commands.add_parser("firmware-sources", help="Acquire verified pinned firmware sources")
+    firmware.add_argument("--online", action="store_true", help="Allow pinned source downloads")
+    stage = commands.add_parser("stage", help="Build or audit one intermediate stage offline")
+    stage.add_argument("name", choices=BUILD_STAGES)
     for name in ("clean", "reproduce"):
         command = commands.add_parser(name)
         command.add_argument("--yes", action="store_true", help="Confirm deletion of the generated outputs")
@@ -67,62 +78,85 @@ def main():
                                 help="Delete superseded stage evidence (keeps only current)")
     prune.add_argument("--keep", type=int, default=0,
                        help="How many superseded evidence directories to keep per stage")
-    args = parser.parse_args()
+    return parser
+
+
+def _key_command(command):
+    """Keep key roles separate while sharing their locked tools preparation."""
+    with pipeline.project_lock(ROOT):
+        pipe = pipeline.Pipeline(ROOT)
+        tools = pipe.ensure("tools")["id"]
+        if command == "keys":
+            return keys.ensure(ROOT, tools)
+        if command == "vboot-keys":
+            return vboot_keys.ensure(ROOT, tools, pipe.ensure("futility")["id"])
+        if command == "pcr-keys":
+            return pcr_keys.ensure(ROOT, tools)
+    raise SafetyError(f"Unknown key command: {command}")
+
+
+def _device_command(args):
+    """Every saved-device operation holds the lock for its entire session."""
+    with pipeline.project_lock(ROOT):
+        if args.command == "device-provision":
+            return profile.provision(ROOT, args.name, replace=args.replace)
+        if args.command == "device-boot":
+            return profile.boot(ROOT, args.name, count=args.count, tcg=args.tcg)
+        if args.command == "data-enroll":
+            return profile.data_enroll(ROOT, args.name)
+        if args.command == "device-reboot":
+            return profile.reboot(ROOT, args.name, resets=args.resets)
+        if args.command == "device-stop":
+            return profile.stop(ROOT, args.name)
+        if args.command == "device-powercut":
+            return profile.powercut(ROOT, args.name)
+        if args.command == "device-snapshot":
+            return profile.snapshot(ROOT, args.name, args.label)
+        if args.command == "device-restore":
+            return profile.restore(ROOT, args.name, args.label)
+    raise SafetyError(f"Unknown device command: {args.command}")
+
+
+def execute(args):
+    """Dispatch parsed arguments; command implementations own their work."""
+    if args.command == "shell":
+        from .shell import boot
+        boot(ROOT)
+        return
+    if args.command == "doctor":
+        return doctor(ROOT)
+    if args.command == "verify-inputs":
+        validate_locks(ROOT)
+        builder.lock(ROOT)
+        builder.root_lock(ROOT)
+        return {"passed": True, "scope": "Specification and project input locks"}
+    if args.command == "secrets":
+        return scan_repository(ROOT)
+    if args.command in ("keys", "vboot-keys", "pcr-keys"):
+        return _key_command(args.command)
+    if args.command.startswith("device-") or args.command == "data-enroll":
+        return _device_command(args)
+    if args.command == "clean":
+        with pipeline.project_lock(ROOT):
+            pipeline.clean(ROOT, confirmed=args.yes)
+        return {"passed": True, "removed": "build/"}
+    if args.command == "reproduce":
+        return pipeline.reproduce(ROOT, confirmed=args.yes)
+    if args.command == "stage":
+        return pipeline.run(ROOT, args.name)
+    if args.command == "prune":
+        with pipeline.project_lock(ROOT):
+            return pipeline.prune(ROOT, keep=args.keep)
+    return pipeline.run(ROOT, args.command,
+                        online=getattr(args, "online", False) or args.command == "bootstrap")
+
+
+def main():
+    args = create_parser().parse_args()
     try:
-        if args.command == "doctor": result = doctor(ROOT)
-        elif args.command == "verify-inputs":
-            validate_locks(ROOT)
-            builder.lock(ROOT)
-            builder.root_lock(ROOT)
-            result = {"passed": True, "scope": "Specification and project input locks"}
-        elif args.command == "secrets": result = scan_repository(ROOT)
-        elif args.command == "keys":
-            with pipeline.project_lock(ROOT):
-                pipe = pipeline.Pipeline(ROOT)
-                result = keys.ensure(ROOT, pipe.ensure("tools")["id"])
-        elif args.command == "vboot-keys":
-            with pipeline.project_lock(ROOT):
-                pipe = pipeline.Pipeline(ROOT)
-                result = vboot_keys.ensure(ROOT, pipe.ensure("tools")["id"],
-                                           pipe.ensure("futility")["id"])
-        elif args.command == "pcr-keys":
-            with pipeline.project_lock(ROOT):
-                pipe = pipeline.Pipeline(ROOT)
-                result = pcr_keys.ensure(ROOT, pipe.ensure("tools")["id"])
-        elif args.command == "clean":
-            with pipeline.project_lock(ROOT): pipeline.clean(ROOT, confirmed=args.yes)
-            result = {"passed": True, "removed": "build/"}
-        elif args.command == "reproduce": result = pipeline.reproduce(ROOT, confirmed=args.yes)
-        elif args.command == "device-provision":
-            with pipeline.project_lock(ROOT):
-                result = profile.provision(ROOT, args.name, replace=args.replace)
-        elif args.command == "device-boot":
-            with pipeline.project_lock(ROOT):
-                result = profile.boot(ROOT, args.name, count=args.count, tcg=args.tcg)
-        elif args.command == "data-enroll":
-            with pipeline.project_lock(ROOT):
-                result = profile.data_enroll(ROOT, args.name)
-        elif args.command == "device-reboot":
-            with pipeline.project_lock(ROOT):
-                result = profile.reboot(ROOT, args.name, resets=args.resets)
-        elif args.command == "device-stop":
-            with pipeline.project_lock(ROOT):
-                result = profile.stop(ROOT, args.name)
-        elif args.command == "device-powercut":
-            with pipeline.project_lock(ROOT):
-                result = profile.powercut(ROOT, args.name)
-        elif args.command == "device-snapshot":
-            with pipeline.project_lock(ROOT):
-                result = profile.snapshot(ROOT, args.name, args.label)
-        elif args.command == "device-restore":
-            with pipeline.project_lock(ROOT):
-                result = profile.restore(ROOT, args.name, args.label)
-        elif args.command == "prune":
-            with pipeline.project_lock(ROOT):
-                result = pipeline.prune(ROOT, keep=args.keep)
-        else:
-            result = pipeline.run(ROOT, args.command, online=getattr(args, "online", False) or args.command == "bootstrap")
-        print(json.dumps(result, indent=2, sort_keys=True))
+        result = execute(args)
+        if args.command != "shell":
+            print(json.dumps(result, indent=2, sort_keys=True))
     except (SafetyError, OSError, KeyError, ValueError, subprocess.SubprocessError) as error:
         print(f"ERROR: {error}", file=sys.stderr)
         sys.exit(1)

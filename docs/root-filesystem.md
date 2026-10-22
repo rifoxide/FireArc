@@ -5,12 +5,13 @@ an already-built [appliance root stage](appliance-root.md), freezes its filesyst
 bytes, then constructs and fully verifies a separate dm-verity tree.
 
 ```sh
-just build-rootfs
-just check-rootfs
+just stage rootfs
+just stage check-rootfs
 ```
 
-The pipeline selects successful dependencies automatically. These commands do not download dependencies unless explicitly requested with `--online`,
-activate device-mapper, mount filesystems, provision disks or launch a VM.
+The pipeline selects successful dependencies automatically. These commands are
+offline: they do not download dependencies, activate device-mapper, mount
+filesystems, provision disks or launch a VM.
 They use the existing pinned tools image/tree. Root assembly runs through mkosi
 and offline systemd-repart in unprivileged namespaces; verity operates on regular
 files in nonprivileged, network-disabled containers.

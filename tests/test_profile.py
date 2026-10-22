@@ -213,7 +213,7 @@ class LoadTests(unittest.TestCase):
                 handle.write(b"X")
             with self.assertRaises(SafetyError) as raised:
                 profile.load(root, "dev1")
-            self.assertIn("LUKS2 data volume region", str(raised.exception))
+            self.assertIn("LUKS2 data volume identity", str(raised.exception))
 
     def test_load_rejects_credential_tampering(self):
         with temporary() as root:
@@ -263,6 +263,113 @@ class LoadTests(unittest.TestCase):
             with self.assertRaises(SafetyError) as raised:
                 profile.load(root, "dev1")
             self.assertIn("token record", str(raised.exception))
+
+
+class DataUnlockContractTests(unittest.TestCase):
+    """The boot verdict depends on the volume's enrollment state (items 9+10)."""
+
+    def _text(self, *markers, root_ok=True):
+        body = "\n".join(markers)
+        if root_ok:
+            body = ("tpm tis\n" + device.TPM_TIS_MARKER + "\n" + body)
+        return body
+
+    def test_enrolled_boot_requires_unlock_and_mount(self):
+        base = self._text(device.REQUIRED_MARKER)
+        # Unlock alone is not enough: the mount must happen too.
+        for partial in ([device.DATA_UNLOCK_OK_MARKER],
+                        [device.DATA_MOUNT_OK_MARKER],
+                        [device.DATA_UNLOCK_REFUSED_MARKER],
+                        [device.DATA_MOUNT_MISSING_MARKER],
+                        [device.DATA_TOKEN_ABSENT_MARKER]):
+            with self.subTest(markers=partial):
+                with self.assertRaises(SafetyError):
+                    profile._assert_boot_markers(
+                        self._text(device.REQUIRED_MARKER, *partial), "boot",
+                        enrolled=True)
+        good = profile._assert_boot_markers(
+            self._text(device.REQUIRED_MARKER, device.DATA_UNLOCK_OK_MARKER,
+                       device.DATA_MOUNT_OK_MARKER), "boot", enrolled=True)
+        self.assertTrue(good[0][device.REQUIRED_MARKER])
+
+    def test_unenrolled_boot_requires_token_absent(self):
+        # A factory/pre-enrollment disk passes only without unlock claims.
+        for bad in ([device.DATA_UNLOCK_OK_MARKER],
+                    [device.DATA_UNLOCK_REFUSED_MARKER],
+                    [device.DATA_MOUNT_MISSING_MARKER], []):
+            with self.subTest(markers=bad):
+                with self.assertRaises(SafetyError):
+                    profile._assert_boot_markers(
+                        self._text(device.REQUIRED_MARKER, *bad), "boot",
+                        enrolled=False)
+        profile._assert_boot_markers(
+            self._text(device.REQUIRED_MARKER, device.DATA_TOKEN_ABSENT_MARKER),
+            "boot", enrolled=False)
+        profile._assert_boot_markers(
+            self._text(device.REQUIRED_MARKER, device.DATA_PROBE_NO_DISK_MARKER),
+            "boot", enrolled=False)
+
+    def test_unlock_marker_alone_cannot_end_the_session(self):
+        self.assertFalse(profile._data_verdict_ready(device.DATA_UNLOCK_OK_MARKER))
+        self.assertTrue(profile._data_verdict_ready(
+            device.DATA_UNLOCK_OK_MARKER + "\n" + device.DATA_MOUNT_OK_MARKER))
+        self.assertTrue(profile._data_verdict_ready(device.DATA_UNLOCK_REFUSED_MARKER))
+        self.assertTrue(profile._data_verdict_ready(device.DATA_MOUNT_MISSING_MARKER))
+
+    def test_enrollment_state_survives_operation_history_rotation(self):
+        self.assertFalse(profile._data_enrolled({"operations": []}))
+        self.assertFalse(profile._data_enrolled({"data": {"keyslots": ["0"]}}))
+        self.assertTrue(profile._data_enrolled(
+            {"data": {"keyslots": ["0", "1"]}, "operations": []}))
+
+
+class EnrolledIdentityScopeTests(unittest.TestCase):
+    """Items 9+10: after enrollment the header is identity; payload is data."""
+
+    def _enrolled_profile(self, root):
+        fabricate(root)
+        provision(root)
+        target = root / "build/devices/dev1"
+        stored = read_json(target / "profile.json")
+        stored["data"]["keyslots"] = ["0", "1"]
+        stored["data"]["token"] = {"type": "systemd-tpm2", "pcrs_plain": ["7"],
+                                   "pcrs_signed": ["11"]}
+        stored["data"].pop("enroll_pending", None)
+        disk = target / "disk.raw"
+        header = bytearray(luks.HEADER_READ_BYTES)
+        header[:6] = luks.LUKS2_MAGIC
+        header[6:8] = (2).to_bytes(2, "big")
+        header[8:16] = (16384).to_bytes(8, "big")
+        metadata = json.dumps({"segments": {"0": {
+            "type": "crypt", "offset": str(2 * luks.MIB)}}}).encode()
+        header[luks.HEADER_JSON_OFFSET:luks.HEADER_JSON_OFFSET + len(metadata)] = metadata
+        with disk.open("r+b") as handle:
+            handle.seek(luks.DATA_OFFSET)
+            handle.write(header)
+        stored["data"]["header_sha256"] = luks.header_digest(disk)
+        profile.save_json(target / "profile.json", stored)
+        return target, disk
+
+    def test_payload_writes_are_data_not_tampering(self):
+        with temporary() as root:
+            target, disk = self._enrolled_profile(root)
+            # An unlocked-and-mounted ext4 legitimately writes into the
+            # payload area (superblock/journal), past metadata AND keyslots.
+            with open(disk, "r+b") as handle:
+                handle.seek(luks.DATA_OFFSET + 2 * luks.MIB + 4096)
+                handle.write(b"mounted filesystem writes here")
+            profile.load(root, "dev1")  # must not raise
+
+    def test_header_change_is_tampering(self):
+        with temporary() as root:
+            target, disk = self._enrolled_profile(root)
+            with open(disk, "r+b") as handle:
+                # Keyslot material beyond the first MiB must be protected too.
+                handle.seek(luks.DATA_OFFSET + luks.MIB + 512)
+                handle.write(b"X")
+            with self.assertRaises(SafetyError) as raised:
+                profile.load(root, "dev1")
+            self.assertIn("identity diverged", str(raised.exception))
 
 
 class IdentityTests(unittest.TestCase):
@@ -402,25 +509,46 @@ class HarnessWiringTests(unittest.TestCase):
                                       enroll_disk="/run/enroll-key.img")
         joined = " ".join(command)
         self.assertIn("-drive if=none,id=enroll0,file=/run/enroll-key.img,format=raw", joined)
-        self.assertIn("-device ide-hd,drive=enroll0,bus=ahci0.1", joined)
+        self.assertIn("-device ide-hd,drive=enroll0,bus=ahci0.1,serial=FIREARC_ENROLL_V1", joined)
         self.assertEqual(joined.count("ide-hd,"), 2)
 
     def test_data_units_are_ordered_and_probe_is_required(self):
         payload = device.dev_cpio(AUTHORITY)
-        for unit in (device.DATA_PROBE_UNIT, device.DATA_ENROLL_UNIT):
+        for unit in (device.DATA_PROBE_UNIT, device.DATA_ENROLL_UNIT,
+                     device.DATA_MOUNT_UNIT):
             self.assertIn("After=systemd-pcrphase-initrd.service", unit)
-            self.assertIn("After=sysroot.mount", unit)
+            self.assertIn("sysroot.mount", unit)
             self.assertIn("Before=initrd.target", unit)
-        self.assertIn(b"firearc-data-probe.service", payload)
-        self.assertIn(b"firearc-data-enroll.service", payload)
-        self.assertIn(b"initrd.target.requires/firearc-data-probe.service", payload)
-        self.assertIn(b"initrd.target.requires/firearc-data-enroll.service", payload)
-        # The enrollment command binds PCR 7 plus the signed PCR 11 policy
-        # and unlocks only via the file-handle credential.
-        self.assertIn("--tpm2-pcrs=7", device.DATA_ENROLL_UNIT)
-        self.assertIn("--tpm2-public-key-pcrs=11", device.DATA_ENROLL_UNIT)
-        self.assertIn("--unlock-key-file=/run/firearc-recovery.key", device.DATA_ENROLL_UNIT)
-        self.assertIn("tpm2-device=auto", device.DATA_PROBE_UNIT)
+        for name in ("firearc-data-probe.service", "firearc-data-enroll.service",
+                     "firearc-data-mount.service"):
+            self.assertIn(name.encode(), payload)
+            self.assertIn(("initrd.target.requires/" + name).encode(), payload)
+        # Unlock configuration is crypttab, consumed by the pinned generator
+        # into a unit only the mount gate starts (noauto, headless, nofail).
+        self.assertIn(b"firearc-data /dev/disk/by-partlabel/FIREARC_DATA - "
+                      b"noauto,nofail,tpm2-device=auto,headless", payload)
+        self.assertIn(b"systemd-cryptsetup@firearc", payload)
+        self.assertIn("Requires=sysroot.mount systemd-cryptsetup@firearc",
+                      device.DATA_FILESYSTEM_MOUNT)
+        # The probe is observation-only: it never attaches by itself.
+        self.assertNotIn("systemd-cryptsetup attach", device.DATA_PROBE_UNIT)
+        self.assertIn("/proc/mounts", device.DATA_PROBE_UNIT)
+        # The mount gate owns the real unlock: mapper wait, fatal refusal,
+        # noexec/nodev/nosuid ext4 mount on the pre-baked sysroot mountpoint.
+        self.assertIn("/dev/mapper/firearc-data", device.DATA_FILESYSTEM_MOUNT)
+        self.assertIn("Options=rw,noexec,nodev,nosuid", device.DATA_FILESYSTEM_MOUNT)
+        self.assertIn("OnFailure=firearc-boot-failure.service", device.DATA_MOUNT_UNIT)
+        # The enrollment command binds PCR 7 plus the signed PCR 11 policy,
+        # unlocks only via the file-handle credential, and births the ext4
+        # filesystem before sealing (failed mkfs leaves the volume
+        # retryable: still unenrolled).
+        script = (ROOT / "images/initrd/99firearc-root/firearc-data-enroll").read_text()
+        self.assertIn("mkfs.ext4 -q -L FIREARC_DATA", script)
+        self.assertNotIn("mkfs.ext4 -F", script)
+        self.assertIn('0:ext4) : ;;', script)
+        self.assertIn("--tpm2-pcrs=7", script)
+        self.assertIn("--tpm2-public-key-pcrs=11", script)
+        self.assertIn('--unlock-key-file="$key"', script)
 
     def test_qemu_command_exposes_local_qmp_and_reboot_control(self):
         command = device.qemu_command("/f", "/d", "/s", kvm=True,
