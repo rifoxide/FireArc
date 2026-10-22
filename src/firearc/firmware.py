@@ -12,20 +12,28 @@ here.
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
+import sys
+import time
 
 from .inputs import load_lock, validate_firmware_sources
-from .integrity import SafetyError, identifier, private_directory, read_json, regular_file, sha256, write_json
+from .integrity import SafetyError, identifier, private_directory, read_json, regular_file, sha256, write_json, fail_line, ok_line
+
 
 
 def git(work, name, *arguments, timeout=600):
     command = ["git", "--no-pager", *arguments]
+    started = time.monotonic()
+    print(f"    \u25b8 {name}\n      $ {shlex.join(command)}", file=sys.stderr, flush=True)
     result = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
     if result.returncode:
         (work / f"{name}.exit").write_text(str(result.returncode))
         (work / f"{name}.stderr").write_text(result.stderr)
         detail = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "no diagnostics"
+        print(fail_line(f"    \u2717 {name} failed ({result.returncode}): {detail}"), file=sys.stderr, flush=True)
         raise SafetyError(f"{name} failed ({result.returncode}): {detail}")
+    print(ok_line(f"    \u2713 {name} ({time.monotonic() - started:.0f}s)"), file=sys.stderr, flush=True)
     return result.stdout
 
 
@@ -101,9 +109,30 @@ def fetch(root, label, *, allow_network=False):
     lock = load_lock(root, "firmware-sources")
     validate_firmware_sources(lock)
     if not allow_network:
-        raise SafetyError("Firmware sources absent; pass --allow-network for explicit acquisition")
+        raise SafetyError("Firmware sources absent; run 'just firmware-sources --online' "
+                         "for explicit network acquisition")
     private_directory(Path(root) / "build", create=True)
-    work = private_directory(Path(root) / "build/firmware", create=True) / label
+    base = private_directory(Path(root) / "build/firmware", create=True)
+    # Resume: a previous acquisition that still verifies against the pins
+    # (exact commits, gitlink census, submodule closure) is adopted as-is —
+    # content-verified reuse instead of a full re-clone.
+    candidates = sorted((candidate for candidate in base.glob("firmware-sources-*")
+                         if candidate.is_dir() and (candidate / "output/sources.json").is_file()),
+                        key=lambda candidate: candidate.stat().st_mtime, reverse=True)
+    for candidate in candidates:
+        try:
+            verify(root, candidate.name)
+        except (SafetyError, FileNotFoundError, NotADirectoryError):
+            continue
+        result = read_json(regular_file(candidate, "result.json"))
+        destination = base / label
+        candidate.rename(destination)
+        print(f"  = adopting existing acquisition {candidate.name} "
+              f"(verified against pins; no re-clone)", file=sys.stderr, flush=True)
+        return {"passed": True, "evidence": str(destination), "sources": result.get("sources"),
+                "submodules": result.get("submodules"), "adopted": candidate.name,
+                "scope": result.get("scope", "Pinned firmware sources")}
+    work = base / label
     work.mkdir(mode=0o700)
     records = {}
     output = work / "output"
@@ -113,10 +142,12 @@ def fetch(root, label, *, allow_network=False):
     census = {}
     for source in parents:
         repository = work / "sources" / source["name"]
+        print(f"  \u25b8 source {source['name']} @ {source['commit'][:12]}", file=sys.stderr, flush=True)
         records[source["name"]] = acquire(work, Path("sources") / source["name"], source, 0)
         census[source["name"]] = gitlinks(work, repository)
         if census[source["name"]] != lock["gitlink_census"][source["name"]]:
             raise SafetyError(f"Pinned tree gitlinks differ from the locked census: {source['name']}")
+        print(ok_line(f"  \u2713 source {source['name']} pinned, tree clean"), file=sys.stderr, flush=True)
     materialized = []
     for source in submodules:
         record = None
@@ -124,6 +155,8 @@ def fetch(root, label, *, allow_network=False):
             if census[destination["repository"]][destination["path"]] != source["commit"]:
                 raise SafetyError(f"Locked submodule pin disagrees with the parent gitlink: {source['name']}")
             relative = Path("sources") / destination["repository"] / destination["path"]
+            print(f"  \u25b8 submodule {source['name']} -> {destination['repository']}:{destination['path']}",
+                  file=sys.stderr, flush=True)
             current = acquire(work, relative, source, sequence)
             if record is None:
                 record = current

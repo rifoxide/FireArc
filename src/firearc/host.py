@@ -5,9 +5,10 @@ from pathlib import Path
 import platform
 import shutil
 import subprocess
+import sys
 
 from .inputs import load_lock
-from .integrity import PRIVATE_PEM, TOKENS, SafetyError, public_name, regular_file, sha256
+from .integrity import PRIVATE_PEM, TOKENS, SafetyError, public_name, regular_file, sha256, fail_line, ok_line
 
 
 def doctor(root):
@@ -28,6 +29,14 @@ def doctor(root):
             except subprocess.TimeoutExpired:
                 item["error"] = "version query timed out"
         tools[name] = item
+        if not item["available"]:
+            print(fail_line(f"  \u2717 {name}: not found"), file=sys.stderr, flush=True)
+        elif "pin_matches" in item and not item["pin_matches"]:
+            print(fail_line(f"  \u2717 {name}: present but digest does not match its pin"), file=sys.stderr, flush=True)
+        else:
+            version = (item.get("version_output") or [""])[0].strip()
+            suffix = f" \u2014 {version}" if version else ""
+            print(ok_line(f"  \u2713 {name}{suffix}"), file=sys.stderr, flush=True)
     qemu_ready = (platform.system() == "Linux" and platform.machine() == "x86_64"
                 and all(tools[name].get("pin_matches") for name in ("qemu-system-x86_64", "qemu-img")))
     return {"qemu_tools_ready": qemu_ready,

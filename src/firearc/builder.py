@@ -15,6 +15,7 @@ from pathlib import Path
 import re
 import shutil
 import stat
+import shlex
 import subprocess
 import sys
 import tarfile
@@ -26,6 +27,7 @@ import uuid
 
 from .inputs import load_lock
 from .integrity import (
+    fail_line, ok_line, paint,
     SafetyError, SHA256, identifier, private_directory, read_json, regular_file,
     relative_name, sha256, verify_file, write_json,
 )
@@ -81,11 +83,32 @@ def root_lock(root):
 
 def logged(work, name, command, *, env=None, timeout=300):
     write_json(work / (name + ".command.json"), command)
+    started = time.monotonic()
+    print(f"  \u25b8 {name}\n    $ {shlex.join(command)}", file=sys.stderr, flush=True)
     with (work / (name + ".stdout")).open("xb") as out, (work / (name + ".stderr")).open("xb") as err:
-        result = subprocess.run(command, env=env, stdin=subprocess.DEVNULL, stdout=out, stderr=err, timeout=timeout)
-    write_json(work / (name + ".exit.json"), {"returncode": result.returncode})
-    if result.returncode:
-        raise SafetyError(f"{name} failed ({result.returncode}); inspect {work}")
+        process = subprocess.Popen(command, env=env, stdin=subprocess.DEVNULL, stdout=out, stderr=err)
+        try:
+            while process.poll() is None:
+                if time.monotonic() - started > timeout:
+                    process.kill()
+                    process.wait(timeout=30)
+                    print(fail_line(f"  \u2717 {name} timed out after {timeout}s; inspect {work}"), file=sys.stderr, flush=True)
+                    raise SafetyError(f"{name} timed out after {timeout}s; inspect {work}")
+                try:
+                    process.wait(timeout=60)
+                except subprocess.TimeoutExpired:
+                    print(paint(f"    \u2026 {name} still running ({time.monotonic() - started:.0f}s)", "2"),
+                          file=sys.stderr, flush=True)
+        except BaseException:
+            process.kill()
+            process.wait(timeout=30)
+            raise
+        returncode = process.returncode
+    write_json(work / (name + ".exit.json"), {"returncode": returncode})
+    if returncode:
+        print(fail_line(f"  \u2717 {name} failed ({returncode}); inspect {work}"), file=sys.stderr, flush=True)
+        raise SafetyError(f"{name} failed ({returncode}); inspect {work}")
+    print(ok_line(f"  \u2713 {name} ({time.monotonic() - started:.0f}s)"), file=sys.stderr, flush=True)
     return (work / (name + ".stdout")).read_text()
 
 
@@ -165,6 +188,8 @@ def open_download(request):
 def download(url, destination, digest, *, limit, size=None):
     if not url.startswith("https://"):
         raise SafetyError("Downloads require HTTPS")
+    started = time.monotonic()
+    print(f"  \u25b8 download {destination.name}\u2026", file=sys.stderr, flush=True)
     request = urllib.request.Request(url, headers={"User-Agent": "FireArc-builder/1"})
     with open_download(request) as response, destination.open("xb") as stream:
         if urllib.parse.urlsplit(response.url).scheme != "https":
@@ -178,6 +203,8 @@ def download(url, destination, digest, *, limit, size=None):
     if size is not None and count != size:
         raise SafetyError("Truncated download")
     verify_file(destination, digest)
+    print(ok_line(f"  \u2713 download {destination.name} ({count / 1e6:.1f} MB, {time.monotonic() - started:.0f}s)"),
+          file=sys.stderr, flush=True)
 
 
 def acquire_metadata(root, *, allow_network=False):
@@ -186,7 +213,19 @@ def acquire_metadata(root, *, allow_network=False):
     value = lock(root)
     target = metadata_path(root)
     if target.exists() or target.is_symlink():
-        raise SafetyError("Metadata already exists; refusing implicit replacement")
+        # An existing acquisition is reused, never re-downloaded, as long as
+        # it still verifies against the signed pins; anything else fails
+        # closed rather than implicitly replacing trusted data.
+        check = target.parent / ("metadata-check-" + uuid.uuid4().hex[:12])
+        check.mkdir(mode=0o700)
+        try:
+            verify_metadata(root, target / "repository", check)
+        except SafetyError:
+            raise SafetyError("Existing metadata does not match its signed pins; "
+                              "inspect build/dependencies manually")
+        print("  = adopting existing metadata (verified against signed pins; no re-download)",
+              file=sys.stderr, flush=True)
+        return
     work = parent(root) / ("metadata-download-" + uuid.uuid4().hex[:12])
     work.mkdir(mode=0o700)
     ensure_base(root, work, True)
@@ -288,7 +327,8 @@ def ensure_base(root, work, allow_network):
     probe = subprocess.run(["docker", "image", "inspect", value["base_image"]], capture_output=True, text=True)
     if probe.returncode:
         if not allow_network:
-            raise SafetyError("Pinned Debian OCI base absent; pass --allow-network for explicit acquisition")
+            raise SafetyError("Pinned Debian OCI base absent; run 'just bootstrap' for "
+                             "explicit network acquisition")
         logged(work, "pull-base", ["docker", "pull", "--platform=linux/amd64", value["base_image"]], timeout=600)
     info = json.loads(logged(work, "inspect-base", ["docker", "image", "inspect", value["base_image"]]))[0]
     if (info["Id"] != "sha256:" + value["base_config_sha256"] or info["Architecture"] != "amd64"
@@ -433,6 +473,8 @@ def fetch_packages(root, label, *, allow_network=False):
         context.mkdir(mode=0o700)
         shutil.copytree(repository, context / "repository")
     cache = private_directory(Path(root) / "build/downloads", create=True)
+    progress = {"done": 0}
+    total = len(plan["packages"])
     def fetch(record):
         path = context / "repository" / record["repository"] / record["filename"]
         blob = cache / (record["sha256"] + ".deb")
@@ -446,6 +488,9 @@ def fetch_packages(root, label, *, allow_network=False):
             verify_file(path, record["sha256"])
         finally:
             os.close(descriptor)
+        progress["done"] += 1
+        if progress["done"] % 25 == 0 or progress["done"] == total:
+            print(f"  \u25b8 packages {progress['done']}/{total}", file=sys.stderr, flush=True)
     with ThreadPoolExecutor(max_workers=4) as executor:
         list(executor.map(fetch, plan["packages"]))
     packages = sorted(f"{p['name']}={p['version']}" for p in plan["packages"])

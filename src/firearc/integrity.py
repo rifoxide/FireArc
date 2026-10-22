@@ -10,6 +10,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import stat
+import sys
 
 
 class SafetyError(ValueError):
@@ -138,3 +139,18 @@ def safe_qemu_path(path):
     if "," in value or any(ord(c) < 32 or ord(c) == 127 for c in value):
         raise SafetyError("QEMU paths must not contain commas or control characters")
     return value
+
+
+def paint(text, code):
+    """ANSI color only when stderr is a terminal; plain text otherwise."""
+    return f"\033[{code}m{text}\033[0m" if sys.stderr.isatty() else text
+
+
+def ok_line(text):
+    """Green success line (terminal only)."""
+    return paint(text, "32")
+
+
+def fail_line(text):
+    """Red failure line (terminal only)."""
+    return paint(text, "31")

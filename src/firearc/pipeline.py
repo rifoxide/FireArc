@@ -12,11 +12,22 @@ import stat
 import subprocess
 import sys
 import tarfile
+import time
 import uuid
 
 from . import builder, device, enroll, firmware, firmware_build, firmware_layout, initrd, pcr_sign, rootfs, sbom, secureboot, sign, uki
 from .inputs import validate_locks
-from .integrity import SafetyError, private_directory, read_json, regular_file, sha256, verify_file, write_json
+from .integrity import SafetyError, private_directory, read_json, regular_file, sha256, verify_file, write_json, ok_line
+
+
+def _stamp():
+    return time.strftime("%H:%M:%S")
+
+
+def _duration(seconds):
+    minutes, seconds = divmod(int(seconds), 60)
+    return f"{minutes}m{seconds:02d}s" if minutes else f"{seconds}s"
+
 
 DEPENDENCIES = {
     "metadata": (), "packages-tools": ("metadata",), "packages-root": ("metadata",),
@@ -269,14 +280,18 @@ class Pipeline:
                 # Verification failures still fail closed.
                 print(f"Stale cached {stage}; rebuilding…", file=sys.stderr, flush=True)
             else:
+                print(f"= {stage} (cached)", file=sys.stderr, flush=True)
                 self.memo[stage] = previous
                 return previous
         if stage.startswith("packages-") or stage == "metadata":
             if not self.online:
                 raise SafetyError("Missing/stale dependencies; run just bootstrap (explicit network acquisition)")
         build_id = stage + "-" + uuid.uuid4().hex[:12]
-        print(f"Building {stage}…", file=sys.stderr, flush=True)
+        print(f"[{_stamp()}] build {stage}", file=sys.stderr, flush=True)
+        started = time.monotonic()
         work, extra = self.produce(stage, build_id, dependencies)
+        print(ok_line(f"[{_stamp()}] ok    {stage} in {_duration(time.monotonic() - started)} "
+                      f"-> {work.relative_to(self.root)}"), file=sys.stderr, flush=True)
         files = {}
         # Keep one compact receipt per successful stage. Logs stay alongside it.
         if stage == "metadata":
