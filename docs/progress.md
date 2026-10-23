@@ -45,6 +45,24 @@ and escrow remain open. The complete secured appliance is not yet implemented.
 - 281 offline tests pass. This cleanup does not change guest unlock/mount policy
   or claim new boot-chain qualification.
 
+## VGA development shell
+
+- `just shell` now opens a GTK QEMU VGA window with the Q35 keyboard, using
+  `/dev/tty1` and `TERM=linux`. Host TTYs are no longer required; a graphical
+  desktop is. Normal boot gates remain headless/serial.
+- No additional host option ROM is loaded. Snapshot-backed disk/pflash, fresh
+  TPM, verified-root/data ordering and saved-device isolation are unchanged.
+- Shell-only boot-log routing adds VGA as the primary Linux/initrd console while
+  retaining serial kernel diagnostics. The selected command line is embedded,
+  section-checked and recorded consistently in the device manifest. Boot output
+  is not cleared for Bash, and the pending-job spinner stops before its prompt.
+- 293 offline tests pass. Live requalification of boot-log routing is pending:
+  the owner's running VM holds the project lock and has been left untouched.
+- Earlier, the standard offline Docker-backed command opened the window;
+  owner closure exited QEMU cleanly and removed temporary state. Signed disk and
+  firmware receipts still matched. Live keyboard/TTY assertions were not captured
+  before closure; see [shell validation](validation/development-shell.md).
+
 ## Host-side script refactor
 
 - Split CLI parser construction, command execution and output/error handling.

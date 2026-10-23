@@ -50,14 +50,17 @@ sudo systemctl start docker
 just shell
 ```
 
-This explicitly builds a **separate signed development image** and boots Bash
-as root inside the verified Debian filesystem. The root remains read-only;
+This opens a **QEMU VGA window** and boots Bash as root inside the verified
+Debian filesystem, using a **separate signed development image**. Run it from a
+graphical desktop (`DISPLAY` or `WAYLAND_DISPLAY`); a host TTY is not required. The root remains read-only;
 `/run` and `/tmp` are writable temporary storage. The VM has a fresh TPM and
 unprovisioned `/data`: it never opens or changes your saved device profiles.
 Disk and firmware writes go into disposable QEMU overlays.
 
-Type `exit` to power off, or **Ctrl+A, then X** to quit QEMU. If the firmware
-menu waits, press Enter. The first run may need a few minutes to build the shell
+Click the VGA window and type `exit` to power off, or close the window to quit.
+If the firmware menu waits, press Enter in that window. Linux and initrd boot
+logs use VGA too; early firmware debug output remains quiet. A running VM keeps
+its old embedded command line: exit and rerun `just shell` after changing it. The first run may need a few minutes to build the shell
 image from the already acquired pinned inputs. No shell is enabled in normal
 boot images. This is a development chroot console with initrd PID 1, not yet a
 full appliance switch-root/service boot. See

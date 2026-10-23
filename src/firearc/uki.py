@@ -123,7 +123,8 @@ def build(root, tools_label, root_label, rootfs_label, label, *, shell=False):
         shutil.copyfile(stub, staging / "linuxx64.efi.stub")
         shutil.copyfile(osrel, staging / "os-release")
         shutil.copyfile(kernel, staging / "kernel")
-        (staging / "cmdline").write_text(device.KERNEL_CMDLINE)
+        cmdline = device.SHELL_KERNEL_CMDLINE if shell else device.KERNEL_CMDLINE
+        (staging / "cmdline").write_text(cmdline)
         # The dev cpio (verity authority + development unit) becomes part of
         # the .initrd section: inside the file the signing step will sign.
         (work / "dev.cpio").write_bytes(device.dev_cpio(authority, shell=shell))
@@ -155,7 +156,7 @@ def build(root, tools_label, root_label, rootfs_label, label, *, shell=False):
             raise SafetyError(f"UKI lacks required sections: {missing}")
         expected = {".linux": (staging / "kernel").read_bytes(),
                     ".initrd": (staging / "initrd.img").read_bytes(),
-                    ".cmdline": device.KERNEL_CMDLINE.encode(),
+                    ".cmdline": cmdline.encode(),
                     ".osrel": osrel.read_bytes(),
                     ".uname": release.encode()}
         for name, content in expected.items():
@@ -174,7 +175,7 @@ def build(root, tools_label, root_label, rootfs_label, label, *, shell=False):
         write_json(work / "uki.json", {
             "schema": 1, "uki": device.UKI_ARTIFACT, "slot": "A",
             "development_shell": shell,
-            "uname": release, "cmdline": device.KERNEL_CMDLINE,
+            "uname": release, "cmdline": cmdline,
             "pe_timestamp": f"{timestamp:#x}", "sections": sections,
             "ukify": version, "tools_image": image,
             "inputs": {"root_label": root_label, "rootfs_label": rootfs_label,

@@ -28,10 +28,11 @@ confirmed two-round reproduction experiment); build/audit/stage commands do
 not accept `--online`. Firmware acquisition also checks/acquires the pinned
 coreboot SDK, even when its source checkout is already cached.
 
-The [shell](validation/development-shell.md) opens Bash as UID 0 inside the
-verified read-only Debian root. `/run` and `/tmp` are temporary and `/data` is
+The [shell](validation/development-shell.md) opens a QEMU VGA window with Bash
+as UID 0 inside the verified read-only Debian root. A graphical desktop
+(`DISPLAY` or `WAYLAND_DISPLAY`) is required, not a host TTY. `/run` and `/tmp` are temporary and `/data` is
 unprovisioned. Saved devices and their credentials are not attached. Type `exit`
-to power off or Ctrl+A, then X to quit QEMU. This replaces the old standalone
+in the VGA window to power off, or close the window to quit QEMU. This replaces the old standalone
 `boot-live` runner; it is not a console on an enrolled saved device.
 
 ## Independent boot gates

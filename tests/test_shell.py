@@ -24,14 +24,26 @@ class ShellTests(unittest.TestCase):
         for required in ("Requires=sysroot.mount firearc-data-mount.service",
                          "After=sysroot.mount firearc-data-mount.service",
                          "RootDirectory=/sysroot", "MountAPIVFS=yes",
-                         "StandardInput=tty-force", "TTYPath=/dev/ttyS0",
+                         "StandardInput=tty-force", "TTYPath=/dev/tty1", "TERM=linux",
                          "ExecStart=/bin/bash --noprofile --norc -i",
                          "OnFailure=firearc-boot-failure.service",
                          "ExecStart=/usr/bin/systemctl --no-block poweroff",
-                         "ExecStart=/usr/bin/sleep infinity", "SYSTEMD_IGNORE_CHROOT=1"):
+                         "ExecStart=/usr/bin/sleep infinity", "SYSTEMD_IGNORE_CHROOT=1",
+                         "TTYReset=no", "ExecStartPre=/bin/bash -c 'kill -s RTMIN+21 1'"):
             self.assertIn(required, unit)
         self.assertNotIn(b"ExecStart=/bin/bash", device.dev_cpio(AUTHORITY))
         self.assertNotIn("rd.shell=1", device.KERNEL_CMDLINE)
+
+    def test_shell_boot_logs_use_vga_without_changing_the_normal_serial_console(self):
+        self.assertNotIn("console=tty0", device.KERNEL_CMDLINE)
+        self.assertEqual(device.SHELL_KERNEL_CMDLINE, device.KERNEL_CMDLINE +
+                         " console=tty0 loglevel=7 systemd.show_status=yes")
+        consoles = [word for word in device.SHELL_KERNEL_CMDLINE.split() if word.startswith("console=")]
+        self.assertEqual(consoles, ["console=ttyS0,115200", "console=tty0"])
+        for flag in ("rd.shell=0", "rd.emergency=poweroff", "ro", "rootflags=ro,noload"):
+            self.assertIn(flag, device.SHELL_KERNEL_CMDLINE.split())
+        for flag in ("quiet", "splash", "rd.debug", "debug", "rd.shell=1"):
+            self.assertNotIn(flag, device.SHELL_KERNEL_CMDLINE.split())
 
     def test_shell_signing_and_enrollment_are_not_normal_build_dependencies(self):
         def closure(stage):
@@ -72,7 +84,8 @@ class ShellTests(unittest.TestCase):
             deps = {name: {"id": name} for name in pipeline.DEPENDENCIES[stage]}
             with self.subTest(stage=stage), patch.object(device, "assemble") as assemble:
                 pipe.produce(stage, stage + "-test", deps)
-                assemble.assert_called_once_with(ROOT, "tools", "rootfs", source, stage + "-test")
+                assemble.assert_called_once_with(ROOT, "tools", "rootfs", source, stage + "-test",
+                                                 shell=stage == "shell-device")
             error = SafetyError("assembler refused")
             with patch.object(device, "assemble", side_effect=error):
                 with self.assertRaises(SafetyError) as refused:
@@ -90,22 +103,29 @@ class ShellTests(unittest.TestCase):
             with self.assertRaisesRegex(SafetyError, "just pcr-keys"):
                 pipe.ensure("shell-pcr-sign")
 
-    def test_interactive_qemu_has_terminal_and_snapshots_all_drives(self):
+    def test_interactive_qemu_has_vga_keyboard_and_snapshots_all_drives(self):
         command = device.qemu_command("flash.rom", "device.raw", "serial.log",
                                       kvm=True, tpm="tpm.sock", interactive=True)
-        self.assertEqual(command[command.index("-serial") + 1], "mon:stdio")
+        self.assertEqual(command[command.index("-display") + 1], "gtk")
+        self.assertIn("VGA,romfile=", command)
+        self.assertEqual(command[command.index("-monitor") + 1], "none")
+        self.assertEqual(command[command.index("-name") + 1], "FireArc development shell")
+        self.assertEqual(command[command.index("-serial") + 1], "file:serial.log")
+        self.assertNotIn("mon:stdio", command)
         self.assertIn("-snapshot", command)
         self.assertIn("-no-reboot", command)
         self.assertIn("tpm-tis,tpmdev=tpm0", command)
         self.assertEqual(command[command.index("-net") + 1], "none")
         normal = device.qemu_command("flash.rom", "device.raw", "serial.log", kvm=True)
         self.assertNotIn("-snapshot", normal)
+        self.assertNotIn("VGA,romfile=", normal)
+        self.assertEqual(normal[normal.index("-display") + 1], "none")
         self.assertIn("file:serial.log", normal)
 
-    def test_shell_rejects_noninteractive_use_before_building(self):
-        with patch.object(sys.stdin, "isatty", return_value=False), \
+    def test_shell_rejects_missing_graphical_desktop_before_building(self):
+        with patch.dict(shell.os.environ, {}, clear=True), \
                 patch.object(shell.pipeline, "Pipeline") as build:
-            with self.assertRaisesRegex(SafetyError, "interactive terminal"):
+            with self.assertRaisesRegex(SafetyError, "graphical desktop"):
                 shell.boot(ROOT)
             build.assert_not_called()
 
@@ -119,14 +139,14 @@ class ShellTests(unittest.TestCase):
             session.kill.assert_called_once()
             session.close.assert_called_once()
 
-    def test_interactive_session_inherits_terminal_descriptors(self):
+    def test_graphical_session_uses_window_input_and_inherits_diagnostics(self):
         with temporary() as work, patch.object(device.subprocess, "Popen") as popen, \
                 patch.object(device.qmp, "QmpControl"), \
                 patch.object(Path, "exists", return_value=True):
             session = device.VmSession(work, "qemu", ["qemu-system-x86_64"], work / "qmp")
             session.start(work / "serial.log", interactive=True)
             args = popen.call_args.kwargs
-            self.assertIsNone(args["stdin"])
+            self.assertEqual(args["stdin"], device.subprocess.DEVNULL)
             self.assertIsNone(args["stdout"])
             self.assertIsNone(args["stderr"])
             self.assertIsNone(session._out)
@@ -134,8 +154,8 @@ class ShellTests(unittest.TestCase):
             session.close()
 
     def test_shell_lifecycle_always_quits_and_removes_scratch_state(self):
-        for code in (0, 1):
-            with self.subTest(code=code), temporary() as work:
+        for display, code in (("DISPLAY", 0), ("WAYLAND_DISPLAY", 0), ("DISPLAY", 1)):
+            with self.subTest(display=display, code=code), temporary() as work:
                 (work / "build").mkdir()
                 output = work / "artifacts"
                 output.mkdir()
@@ -145,8 +165,9 @@ class ShellTests(unittest.TestCase):
                 machine.session.process.wait.return_value = code
                 pins = {name: {"sha256": "digest"}
                         for name in ("qemu-system-x86_64", "swtpm")}
-                with patch.object(sys.stdin, "isatty", return_value=True), \
-                        patch.object(sys.stdout, "isatty", return_value=True), \
+                with patch.dict(shell.os.environ, {display: "test-display"}, clear=True), \
+                        patch.object(sys.stdin, "isatty", return_value=False), \
+                        patch.object(sys.stdout, "isatty", return_value=False), \
                         patch.object(shell, "load_lock", return_value={"tools": pins}), \
                         patch.object(shell.shutil, "which", side_effect=lambda name: "/bin/" + name), \
                         patch.object(shell, "sha256", return_value="digest"), \

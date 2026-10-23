@@ -71,6 +71,9 @@ PARTITIONS = (
 
 KERNEL_CMDLINE = ("root=/dev/mapper/firearc-root rootfstype=ext4 rootflags=ro,noload ro "
                   "rauc.slot=A rd.shell=0 rd.emergency=poweroff console=ttyS0,115200")
+# Keep serial kernel diagnostics, but make VGA the development shell's primary
+# console so initrd status and root/data gate messages are visible in its window.
+SHELL_KERNEL_CMDLINE = KERNEL_CMDLINE + " console=tty0 loglevel=7 systemd.show_status=yes"
 
 # The unsigned slot-A Unified Kernel Image (built by the uki stage) and its
 # systemd-boot type-2 auto-entry location on the ESP. The kernel, command
@@ -154,14 +157,17 @@ BindPaths=/dev /run
 TemporaryFileSystem=/tmp:rw,nosuid,nodev,mode=1777
 # /run exposes this VM's initrd manager. Permit systemctl from the verified
 # chroot to request shutdown instead of silently ignoring the command.
-Environment=HOME=/root HISTFILE=/dev/null TERM=vt100 SYSTEMD_IGNORE_CHROOT=1 "PS1=firearc# "
+Environment=HOME=/root HISTFILE=/dev/null TERM=linux SYSTEMD_IGNORE_CHROOT=1 "PS1=firearc# "
 StandardInput=tty-force
 StandardOutput=tty
 StandardError=tty
-TTYPath=/dev/ttyS0
-TTYReset=yes
+TTYPath=/dev/tty1
+TTYReset=no
 TTYVHangup=yes
-ExecStartPre=/usr/bin/printf '\\nFireArc DEVELOPMENT shell: verified read-only Debian root; temporary VM state.\\nExit powers off. Ctrl-A then X exits QEMU.\\n'
+# Stop PID 1's pending-job status spinner before handing the VT to Bash.
+# Do not clear the boot output when the shell takes over the console.
+ExecStartPre=/bin/bash -c 'kill -s RTMIN+21 1'
+ExecStartPre=/usr/bin/printf '\\nFireArc DEVELOPMENT shell: verified read-only Debian root; temporary VM state.\\nExit powers off. Close the QEMU window to quit.\\n'
 ExecStart=/bin/bash --noprofile --norc -i
 # Keep initrd.target blocked until the poweroff transaction stops this unit;
 # finishing the oneshot would race switch-root against shutdown.
@@ -428,9 +434,14 @@ def qemu_command(firmware, disk, serial, *, kvm, tpm=None, qmp_socket=None, rebo
     # The payload has no virtio drivers: the development disk is presented
     # over the emulated ICH9 AHCI controller the payload does support.
     command = ["qemu-system-x86_64", "-machine", "q35", "-accel", "kvm" if kvm else "tcg",
-               "-cpu", "max", "-m", "2048", "-nodefaults", "-display", "none",
-               "-net", "none", "-serial", "mon:stdio" if interactive else f"file:{serial}"]
+               "-cpu", "max", "-m", "2048", "-nodefaults", "-display", "gtk" if interactive else "none",
+               "-net", "none", "-serial", f"file:{serial}"]
     if interactive:
+        # The pinned firmware initializes standard VGA natively. Disable the
+        # option ROM rather than executing an additional host-supplied BIOS.
+        # The Q35 PS/2 keyboard feeds the guest VT, not the host terminal.
+        command += ["-device", "VGA,romfile=", "-monitor", "none",
+                    "-name", "FireArc development shell"]
         # Never let a console session write into receipt-covered factory disks
         # or firmware. QEMU overlays ALL drives, including monolithic pflash.
         command += ["-snapshot"]
@@ -493,15 +504,16 @@ class VmSession:
         write_json(self.work / (self.name + ".command.json"), self.command)
         self.serial_path = serial_path
         accel = "kvm" if "kvm" in self.command else "tcg"
-        console = "your terminal" if interactive else f"{serial_path.parent.name}/{serial_path.name}"
-        print(f"  \u25b8 {self.name}: QEMU booting ({accel}), serial -> {console}\n"
+        console = f"{serial_path.parent.name}/{serial_path.name}"
+        display = "VGA window, " if interactive else ""
+        print(f"  \u25b8 {self.name}: QEMU booting ({accel}), {display}serial -> {console}\n"
               f"    $ {shlex.join(self.command)}", file=sys.stderr, flush=True)
         self.started = time.monotonic()
         if not interactive:
             self._out = (self.work / (self.name + ".stdout")).open("xb")
             self._err = (self.work / (self.name + ".stderr")).open("xb")
         self.process = subprocess.Popen(self.command,
-                                        stdin=None if interactive else subprocess.DEVNULL,
+                                        stdin=subprocess.DEVNULL,
                                         stdout=self._out, stderr=self._err,
                                         preexec_fn=die_with_parent)
         self.deadline = time.monotonic() + self.timeout
@@ -696,7 +708,7 @@ def _stage_outputs(root, label, expected, parent=None):
     return source, output, result
 
 
-def assemble(root, tools_label, rootfs_label, sign_label, label):
+def assemble(root, tools_label, rootfs_label, sign_label, label, *, shell=False):
     """Build the development disk from the frozen payloads and signed boot artifacts."""
     builder.verify_tools(root, tools_label)
     payload_source, payload_output, payload_result = _stage_outputs(root, rootfs_label, "rootfs")
@@ -775,7 +787,7 @@ def assemble(root, tools_label, rootfs_label, sign_label, label):
             "disk_guid": DISK_GUID, "deterministic_development_ids": True,
             "partitions": [{"name": name, "start_sector": start, "sectors": size,
                             "type": kind, "uuid": unique} for name, start, size, kind, unique in PARTITIONS],
-            "kernel_cmdline": KERNEL_CMDLINE,
+            "kernel_cmdline": SHELL_KERNEL_CMDLINE if shell else KERNEL_CMDLINE,
             "data_partition": {"name": "FIREARC_DATA", "size_mib": DATA_MIB,
                                 "offset_bytes": DATA_OFFSET, "blank": True,
                                 "luks": "provisioned per device only (Phase 5 item 6)"},

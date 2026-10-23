@@ -427,7 +427,7 @@ class Pipeline:
             return self.build / "images" / build_id, {}
         if image_stage == "device":
             device.assemble(root, deps["tools"]["id"], deps["rootfs"]["id"],
-                            deps[prefix + "sign"]["id"], build_id)
+                            deps[prefix + "sign"]["id"], build_id, shell=bool(prefix))
             return self.build / "images" / build_id, {}
         if stage == "check-secure-boot":
             secureboot.check_secure_boot(root, deps["tools"]["id"], deps["pcr-sign"]["id"],

@@ -13,8 +13,8 @@ from .integrity import SafetyError, regular_file, sha256
 
 def boot(root):
     """Boot a disposable factory disk into Bash in the verified Debian root."""
-    if not sys.stdin.isatty() or not sys.stdout.isatty():
-        raise SafetyError("just shell needs an interactive terminal (stdin and stdout)")
+    if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
+        raise SafetyError("just shell needs a graphical desktop (DISPLAY or WAYLAND_DISPLAY)")
     tools = {}
     pins = load_lock(root, "host-tools")["tools"]
     for name in ("qemu-system-x86_64", "swtpm"):
@@ -40,8 +40,9 @@ def boot(root):
             tpm.mkdir(mode=0o700)
             print("\nDEVELOPMENT SHELL — disposable VM; saved devices are untouched.\n"
                   "Verified Debian root is read-only; /run and /tmp are temporary.\n"
-                  "/data is not provisioned. Exit powers off; Ctrl-A then X exits QEMU.\n"
-                  "If the firmware menu waits, press Enter.\n", file=sys.stderr, flush=True)
+                  "/data is not provisioned. Type in the VGA window; exit powers off.\n"
+                  "Close the QEMU window to quit. If the firmware menu waits, press Enter there.\n",
+                  file=sys.stderr, flush=True)
             with profile.Machine(work, tools["qemu-system-x86_64"], tools["swtpm"],
                                  flash, disk, tpm, work / "serial.log",
                                  kvm=os.access("/dev/kvm", os.R_OK | os.W_OK),
